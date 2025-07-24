@@ -1,0 +1,23 @@
+# Environment variables
+# Never commit this file!
+.env
+
+# Virtual Environment
+# This folder contains installed packages and can be very large.
+# It should be recreated from requirements.txt instead of committed.
+/venv/
+/.venv/
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# Database file
+# Contains user data that changes constantly.
+*.db
+*.sqlite3
+
+# IDE configuration files
+# Specific to your code editor (e.g., PyCharm, VSCode)
+.idea/
+.vscode/
