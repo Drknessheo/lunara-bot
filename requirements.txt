@@ -1,0 +1,6 @@
+python-telegram-bot[ext]
+python-binance
+requests
+apscheduler
+numpy
+python-dotenv
