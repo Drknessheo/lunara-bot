@@ -17,3 +17,7 @@ DB_NAME = "sprttrade.db"
 RSI_BUY_THRESHOLD = 30.0
 RSI_SELL_THRESHOLD = 70.0
 PROFIT_TARGET_PERCENTAGE = 25.0
+STOP_LOSS_PERCENTAGE = 10.0
+
+# Strategic Alert configuration
+BTC_ALERT_THRESHOLD_PERCENT = 2.0  # Alert if BTC moves more than this % in 1 hour.
