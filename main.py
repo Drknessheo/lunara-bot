@@ -1,4 +1,5 @@
 import logging
+import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -37,24 +38,40 @@ async def import_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await trade.import_last_trade_command(update, context)
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler for the /status command. Will query the database."""
+    """Handler for the /status command. Shows open quests and watched symbols."""
     user_id = update.effective_user.id
     open_trades = db.get_open_trades(user_id)
+    watched_items = db.get_watched_items_by_user(user_id)
 
-    if not open_trades:
-        await update.message.reply_text("You have no open trades. Use /crypto to find an opportunity.")
+    if not open_trades and not watched_items:
+        await update.message.reply_text("You have no open quests or watched symbols. Use /crypto to find an opportunity.")
         return
 
-    message = "📜 **Your Open Quests (Trades):**\n\n"
-    for trade in open_trades:
-        # The target price is +25% as per your plan
-        message += (
-            f"🔹 **{trade['coin_symbol']}** (ID: {trade['id']})\n"
-            f"   - Bought at: `${trade['buy_price']:,.8f}`\n"
-            f"   - ✅ Take Profit: `${trade['take_profit_price']:,.8f}`\n"
-            f"   - 🛡️ Stop Loss: `${trade['stop_loss_price']:,.8f}`\n"
-            f"   - *Opened: {trade['buy_timestamp']}*\n\n"
-        )
+    message = ""
+    if open_trades:
+        message += "📜 **Your Open Quests (Trades):**\n\n"
+        for trade in open_trades:
+            message += (
+                f"🔹 **{trade['coin_symbol']}** (ID: {trade['id']})\n"
+                f"   - Bought at: `${trade['buy_price']:,.8f}`\n"
+                f"   - ✅ Take Profit: `${trade['take_profit_price']:,.8f}`\n"
+                f"   - 🛡️ Stop Loss: `${trade['stop_loss_price']:,.8f}`\n"
+                f"   - *Opened: {trade['buy_timestamp']}*\n\n"
+            )
+
+    if watched_items:
+        message += "🔭 **Your Watched Symbols:**\n\n"
+        for item in watched_items:
+            # Calculate time since added
+            add_time = datetime.datetime.strptime(item['add_timestamp'], '%Y-%m-%d %H:%M:%S')
+            time_watching = datetime.datetime.utcnow() - add_time
+            hours, remainder = divmod(time_watching.total_seconds(), 3600)
+            minutes, _ = divmod(remainder, 60)
+            message += (
+                f"🔸 **{item['coin_symbol']}**\n"
+                f"   - *Watching for a dip for {int(hours)}h {int(minutes)}m*\n\n"
+            )
+
     await update.message.reply_text(message, parse_mode='Markdown')
 
 async def resonate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -151,7 +168,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Here are the commands you can use on your quest:\n\n"
         "**/start** - Begin your journey with me.\n"
         "**/quest** - Get a thematic introduction to trading.\n"
-        "**/crypto `<SYMBOL>`** - Scan a crypto pair (e.g., `/crypto BTCUSDT`). If RSI is low, a trade is automatically opened for you.\n"
+        "**/crypto `<SYMBOL>`** - Scan a crypto pair (e.g., `/crypto BTCUSDT`). If RSI is low, it's added to a watchlist for an automatic dip-buy.\n"
         "**/import `<SYMBOL> [PRICE]`** - Import a trade. Fetches from Binance or uses the price you provide (e.g., `/import CTKUSDT 0.75`).\n"
         "**/status** - View all your currently open trades (quests).\n"
         "**/close `<ID>`** - Manually close an open trade using its ID from `/status`.\n"

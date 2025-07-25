@@ -21,3 +21,7 @@ STOP_LOSS_PERCENTAGE = 10.0
 
 # Strategic Alert configuration
 BTC_ALERT_THRESHOLD_PERCENT = 2.0  # Alert if BTC moves more than this % in 1 hour.
+
+# Dip-Buying Logic
+RSI_BUY_RECOVERY_THRESHOLD = 32.0 # Buy if RSI crosses above this after dipping below 30.
+WATCHLIST_TIMEOUT_HOURS = 24      # Remove from watchlist after this many hours.

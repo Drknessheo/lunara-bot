@@ -100,6 +100,16 @@ async def crypto_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("Please specify a trading pair. Usage: `/crypto BTCUSDT`", parse_mode='Markdown')
         return
 
+    user_id = update.effective_user.id
+    # Check if a trade is already open or on the watchlist for this symbol
+    if db.is_trade_open(user_id, symbol):
+        await update.message.reply_text(f"You already have an open quest for {symbol}. Use /status to see it.")
+        return
+
+    if db.is_on_watchlist(user_id, symbol):
+        await update.message.reply_text(f"You are already watching {symbol} for a dip. Use /status to check.")
+        return
+
     await update.message.reply_text(f"Lunura is gazing into the cosmic energies of {symbol}... 🔮")
     price = get_current_price(symbol)
     rsi = get_rsi(symbol)
@@ -111,23 +121,18 @@ async def crypto_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"⚖️ **Hourly RSI({14}):** `{rsi:.2f}`\n\n"
         )
         if rsi < config.RSI_BUY_THRESHOLD:
-            message += "The energies are low. A potential buying opportunity appears on the horizon."
+            # Instead of buying, add to watchlist
+            db.add_to_watchlist(user_id=user_id, coin_symbol=symbol)
+            message += (
+                f"The energies for {symbol} are low. I will watch it for the perfect moment to strike (buy the dip) and notify you.\n\n"
+                f"*I will automatically open a quest if the RSI shows signs of recovery.*"
+            )
             if is_weekend():
                 message += "\n\n*Note: Weekend trading can have lower volume and higher risk. Please trade with caution.*"
         elif rsi > config.RSI_SELL_THRESHOLD:
             message += "The energies are high. It may be a time to consider taking profits."
         else:
             message += "The market is in balance. Patience is a virtue."
-
-        # Log the trade signal as an open trade for the user
-        if rsi < config.RSI_BUY_THRESHOLD:
-            user_id = update.effective_user.id
-            # Calculate Stop-Loss (-10%) and Take-Profit (+25%)
-            stop_loss_price = price * (1 - config.STOP_LOSS_PERCENTAGE / 100)
-            take_profit_price = price * (1 + config.PROFIT_TARGET_PERCENTAGE / 100)
-
-            db.log_trade(user_id=user_id, coin_symbol=symbol, buy_price=price, stop_loss=stop_loss_price, take_profit=take_profit_price)
-            message += "\n\n*A new quest has been recorded with automated risk management! Use /status to see your open trades.*\n"
 
         message += "\n*New to trading?* Join Binance with my link!"
 
@@ -213,6 +218,67 @@ async def check_btc_volatility_and_alert(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"An unexpected error occurred during market volatility check: {e}")
 
+async def check_watchlist_for_buys(context: ContextTypes.DEFAULT_TYPE):
+    """Monitors coins on the watchlist to find a dip-buy opportunity."""
+    watchlist_items = db.get_all_watchlist_items()
+    if not watchlist_items:
+        return
+
+    logger.info(f"Checking {len(watchlist_items)} item(s) on the watchlist for dip-buy opportunities...")
+
+    now = datetime.datetime.utcnow()
+
+    for item in watchlist_items:
+        symbol = item['coin_symbol']
+        item_id = item['id']
+        user_id = item['user_id']
+
+        # Check for timeout
+        add_time = datetime.datetime.strptime(item['add_timestamp'], '%Y-%m-%d %H:%M:%S')
+        hours_passed = (now - add_time).total_seconds() / 3600
+        if hours_passed > config.WATCHLIST_TIMEOUT_HOURS:
+            db.remove_from_watchlist(item_id)
+            logger.info(f"Removed {symbol} from watchlist for user {user_id} due to timeout.")
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"⏳ Your watch on **{symbol}** has expired without a buy signal. The opportunity has passed for now.",
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                logger.error(f"Failed to send watchlist timeout notification to user {user_id}: {e}")
+            continue
+
+        # Check for buy signal (RSI recovery)
+        current_rsi = get_rsi(symbol)
+        if current_rsi and current_rsi > config.RSI_BUY_RECOVERY_THRESHOLD:
+            # We have a buy signal!
+            current_price = get_current_price(symbol)
+            if not current_price:
+                logger.warning(f"Could not get price for {symbol} to execute watchlist buy. Will retry.")
+                continue
+
+            # Log the trade
+            stop_loss_price = current_price * (1 - config.STOP_LOSS_PERCENTAGE / 100)
+            take_profit_price = current_price * (1 + config.PROFIT_TARGET_PERCENTAGE / 100)
+            db.log_trade(user_id=user_id, coin_symbol=symbol, buy_price=current_price, stop_loss=stop_loss_price, take_profit=take_profit_price)
+            db.remove_from_watchlist(item_id)
+            logger.info(f"Executed dip-buy for {symbol} for user {user_id} at price {current_price}")
+
+            # Notify user
+            message = (
+                f"🎯 **Dip Secured!** 🎯\n\n"
+                f"Lunura has opened a new quest for **{symbol}** after spotting a recovery!\n\n"
+                f"   - Bought at: `${current_price:,.8f}`\n"
+                f"   - ✅ Take Profit: `${take_profit_price:,.8f}`\n"
+                f"   - 🛡️ Stop Loss: `${stop_loss_price:,.8f}`\n\n"
+                f"Use /status to see your open quests."
+            )
+            try:
+                await context.bot.send_message(chat_id=user_id, text=message, parse_mode='Markdown')
+            except Exception as e:
+                logger.error(f"Failed to send dip-buy notification to user {user_id}: {e}")
+
 async def monitor_market_and_trades(context: ContextTypes.DEFAULT_TYPE):
     """
     The intelligent core of the bot. Called by the JobQueue to:
@@ -227,6 +293,9 @@ async def monitor_market_and_trades(context: ContextTypes.DEFAULT_TYPE):
     
     # Part 1: Strategic Market Condition Alert
     await check_btc_volatility_and_alert(context)
+
+    # Part 1.5: Check watchlist for dip-buy opportunities
+    await check_watchlist_for_buys(context)
 
     # Part 2: Check individual open trades
     # 1. Get all unique symbols from open trades to check

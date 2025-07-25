@@ -25,6 +25,16 @@ def initialize_database():
             take_profit_price REAL
         );
     ''')
+    # Add a new table for the dip-buy watchlist
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS watchlist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            coin_symbol TEXT NOT NULL,
+            add_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, coin_symbol)
+        );
+    ''')
     conn.commit()
     conn.close()
     print("Database initialized successfully.")
@@ -121,3 +131,49 @@ def is_trade_open(user_id: int, coin_symbol: str):
     ).fetchone()
     conn.close()
     return trade is not None
+
+def is_on_watchlist(user_id: int, coin_symbol: str):
+    """Checks if a user is already watching a specific symbol."""
+    conn = get_db_connection()
+    item = conn.execute(
+        "SELECT id FROM watchlist WHERE user_id = ? AND coin_symbol = ?",
+        (user_id, coin_symbol)
+    ).fetchone()
+    conn.close()
+    return item is not None
+
+# --- Watchlist Functions ---
+
+def add_to_watchlist(user_id: int, coin_symbol: str):
+    """Adds a coin to the user's watchlist. Ignores if already present."""
+    conn = get_db_connection()
+    # Use INSERT OR IGNORE to prevent errors on duplicate entries
+    conn.execute(
+        "INSERT OR IGNORE INTO watchlist (user_id, coin_symbol) VALUES (?, ?)",
+        (user_id, coin_symbol)
+    )
+    conn.commit()
+    conn.close()
+
+def get_all_watchlist_items():
+    """Retrieves all items from the watchlist for all users."""
+    conn = get_db_connection()
+    items = conn.execute("SELECT id, user_id, coin_symbol, add_timestamp FROM watchlist").fetchall()
+    conn.close()
+    return items
+
+def remove_from_watchlist(item_id: int):
+    """Removes an item from the watchlist by its ID."""
+    conn = get_db_connection()
+    conn.execute("DELETE FROM watchlist WHERE id = ?", (item_id,))
+    conn.commit()
+    conn.close()
+
+def get_watched_items_by_user(user_id: int):
+    """Retrieves all watched symbols for a specific user."""
+    conn = get_db_connection()
+    items = conn.execute(
+        "SELECT coin_symbol, add_timestamp FROM watchlist WHERE user_id = ?", (user_id,)
+    ).fetchall()
+    conn.close()
+    return items
