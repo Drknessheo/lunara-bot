@@ -1,5 +1,6 @@
 import logging
 import numpy as np
+import time
 import datetime
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
@@ -17,6 +18,26 @@ if config.BINANCE_API_KEY and config.BINANCE_SECRET_KEY:
 else:
     logger.warning("Binance API keys not found. Trading functions will be disabled.")
     client = None
+
+def get_user_client(user_id: int):
+    """Creates a Binance client instance for a specific user using their stored keys."""
+    # For the admin, use the globally configured API keys from the .env file.
+    if user_id == config.ADMIN_USER_ID:
+        if client:
+            return client
+        else:
+            logger.error("Admin action failed: Global Binance API keys are not configured in .env")
+            return None
+
+    api_key, secret_key = db.get_user_api_keys(user_id)
+    if not api_key or not secret_key:
+        logger.warning(f"API keys not found for user {user_id}.")
+        return None
+    try:
+        return Client(api_key, secret_key)
+    except Exception as e:
+        logger.error(f"Failed to create Binance client for user {user_id}: {e}")
+        return None
 
 def is_weekend():
     """Checks if the current day is Saturday or Sunday (UTC)."""
@@ -58,37 +79,63 @@ def get_rsi(symbol="BTCUSDT", interval=Client.KLINE_INTERVAL_1HOUR, period=14):
         logger.error(f"An unexpected error occurred getting RSI for {symbol}: {e}")
         return None
 
-def get_account_balance(asset="USDT"):
-    """Fetches the free balance for a specific asset from the Binance spot account."""
+def get_bollinger_bands(symbol, interval=Client.KLINE_INTERVAL_1HOUR, period=20, std_dev=2):
+    """Calculates Bollinger Bands for a given symbol."""
     try:
-        balance = client.get_asset_balance(asset=asset)
+        # Fetch more klines to ensure SMA calculation is accurate
+        klines = client.get_historical_klines(symbol, interval, f"{period + 50} hours ago UTC")
+        if len(klines) < period:
+            return None, None, None, None
+
+        closes = np.array([float(k[4]) for k in klines])
+
+        # Calculate SMA and Standard Deviation for the most recent `period`
+        sma = np.mean(closes[-period:])
+        std = np.std(closes[-period:])
+
+        upper_band = sma + (std * std_dev)
+        lower_band = sma - (std * std_dev)
+        return upper_band, sma, lower_band, std
+    except Exception as e:
+        logger.error(f"An unexpected error occurred getting Bollinger Bands for {symbol}: {e}")
+        return None, None, None, None
+
+def get_account_balance(user_id: int, asset="USDT"):
+    """Fetches the free balance for a specific asset from the Binance spot account."""
+    user_client = get_user_client(user_id)
+    if not user_client:
+        return None
+    try:
+        balance = user_client.get_asset_balance(asset=asset) # type: ignore
         return float(balance['free']) if balance else 0.0
     except BinanceAPIException as e:
-        logger.error(f"Binance API error getting account balance: {e}")
+        logger.error(f"Binance API error getting account balance for user {user_id}: {e}")
         return None
     except Exception as e:
-        logger.error(f"An unexpected error occurred getting account balance: {e}")
+        logger.error(f"An unexpected error occurred getting account balance for user {user_id}: {e}")
         return None
 
-def get_last_trade_from_binance(symbol: str):
+def get_last_trade_from_binance(user_id: int, symbol: str):
     """Fetches the user's most recent trade for a given symbol from Binance."""
+    user_client = get_user_client(user_id)
+    if not user_client: return None
     try:
         # Fetch the last trade. The list is ordered from oldest to newest.
-        trades = client.get_my_trades(symbol=symbol, limit=1)
+        trades = user_client.get_my_trades(symbol=symbol, limit=1) # type: ignore
         if not trades:
             return None
         return trades[0] # The most recent trade
     except BinanceAPIException as e:
-        logger.error(f"Binance API error getting last trade for {symbol}: {e}")
+        logger.error(f"Binance API error getting last trade for {symbol} for user {user_id}: {e}")
         return None
     except Exception as e:
-        logger.error(f"An unexpected error occurred getting last trade for {symbol}: {e}")
+        logger.error(f"An unexpected error occurred getting last trade for {symbol} for user {user_id}: {e}")
         return None
 
-async def crypto_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def quest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Handles the /crypto command, providing price and RSI for a given symbol.
-    Usage: /crypto <SYMBOL> (e.g., /crypto PEPEUSDT)
+    Handles the /quest command, providing price and RSI for a given symbol.
+    Usage: /quest <SYMBOL> (e.g., /quest PEPEUSDT)
     """
     if not client:
         await update.message.reply_text("The connection to the crypto realm (Binance) is not configured. Please check API keys.")
@@ -97,10 +144,12 @@ async def crypto_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         symbol = context.args[0].upper()
     except IndexError:
-        await update.message.reply_text("Please specify a trading pair. Usage: `/crypto BTCUSDT`", parse_mode='Markdown')
+        await update.message.reply_text("Please specify a trading pair. Usage: `/quest BTCUSDT`", parse_mode='Markdown')
         return
 
     user_id = update.effective_user.id
+    settings = db.get_user_effective_settings(user_id)
+
     # Check if a trade is already open or on the watchlist for this symbol
     if db.is_trade_open(user_id, symbol):
         await update.message.reply_text(f"You already have an open quest for {symbol}. Use /status to see it.")
@@ -110,7 +159,7 @@ async def crypto_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"You are already watching {symbol} for a dip. Use /status to check.")
         return
 
-    await update.message.reply_text(f"Lunura is gazing into the cosmic energies of {symbol}... 🔮")
+    await update.message.reply_text(f"Lunessa is gazing into the cosmic energies of {symbol}... 🔮")
     price = get_current_price(symbol)
     rsi = get_rsi(symbol)
 
@@ -120,16 +169,43 @@ async def crypto_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"✨ **Current Price:** `${price:,.8f}`\n"
             f"⚖️ **Hourly RSI({14}):** `{rsi:.2f}`\n\n"
         )
-        if rsi < config.RSI_BUY_THRESHOLD:
-            # Instead of buying, add to watchlist
+
+        # --- Premium Feature: Enhanced Buy Signal with Bollinger Bands ---
+        is_bollinger_buy = False
+        is_premium_user = settings.get('USE_BOLLINGER_BANDS')
+        if settings.get('USE_BOLLINGER_BANDS'):
+            _, _, lower_band, _ = get_bollinger_bands(
+                symbol,
+                period=settings.get('BOLL_PERIOD', 20),
+                std_dev=settings.get('BOLL_STD_DEV', 2)
+            )
+            if lower_band:
+                message += f"📊 **Lower Bollinger Band:** `${lower_band:,.8f}`\n\n"
+                if price <= lower_band:
+                    is_bollinger_buy = True
+
+        # --- Determine Buy Condition based on user tier ---
+        is_rsi_low = rsi < settings['RSI_BUY_THRESHOLD']
+
+        # For premium users, both conditions must be met. For free users, only RSI.
+        should_add_to_watchlist = (is_premium_user and is_rsi_low and is_bollinger_buy) or \
+                                  (not is_premium_user and is_rsi_low)
+
+        if should_add_to_watchlist:
             db.add_to_watchlist(user_id=user_id, coin_symbol=symbol)
+
+            if is_premium_user: # This implies a strong, combined signal was found
+                message += (
+                    f"**⭐ Premium Signal!** The price has pierced the lower Bollinger Band while the RSI is low. A confluence of energies suggests a prime opportunity.\n\n"
+                )
+
             message += (
                 f"The energies for {symbol} are low. I will watch it for the perfect moment to strike (buy the dip) and notify you.\n\n"
                 f"*I will automatically open a quest if the RSI shows signs of recovery.*"
             )
             if is_weekend():
                 message += "\n\n*Note: Weekend trading can have lower volume and higher risk. Please trade with caution.*"
-        elif rsi > config.RSI_SELL_THRESHOLD:
+        elif rsi > settings['RSI_SELL_THRESHOLD']:
             message += "The energies are high. It may be a time to consider taking profits."
         else:
             message += "The market is in balance. Patience is a virtue."
@@ -142,16 +218,26 @@ async def crypto_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the /balance command."""
-    if not client:
-        await update.message.reply_text("The connection to the crypto realm (Binance) is not configured.")
+    user_id = update.effective_user.id
+    mode, paper_balance = db.get_user_trading_mode_and_balance(user_id)
+
+    if mode == 'PAPER':
+        await update.message.reply_text(f"You are in Paper Trading mode.\n💰 **Paper Balance:** ${paper_balance:,.2f} USDT", parse_mode='Markdown')
         return
 
+    # Live mode logic
+    api_key, _ = db.get_user_api_keys(user_id)
+    if not api_key:
+        await update.message.reply_text("Your Binance API keys are not set. Please use `/setapi <key> <secret>` in a private chat with me.")
+        return
+
+    
     await update.message.reply_text("Checking your treasure chest (Binance)...")
-    balance = get_account_balance(asset="USDT")
+    balance = get_account_balance(user_id, asset="USDT")
     if balance is not None:
         await update.message.reply_text(f"You hold **{balance:.2f} USDT**.", parse_mode='Markdown')
     else:
-        await update.message.reply_text("Could not retrieve your balance. Check your API key permissions.")
+        await update.message.reply_text("Could not retrieve your balance. Please check your API key permissions on Binance.")
 
 async def check_btc_volatility_and_alert(context: ContextTypes.DEFAULT_TYPE):
     """
@@ -218,7 +304,7 @@ async def check_btc_volatility_and_alert(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"An unexpected error occurred during market volatility check: {e}")
 
-async def check_watchlist_for_buys(context: ContextTypes.DEFAULT_TYPE):
+async def check_watchlist_for_buys(context: ContextTypes.DEFAULT_TYPE, prices: dict, indicator_cache: dict):
     """Monitors coins on the watchlist to find a dip-buy opportunity."""
     watchlist_items = db.get_all_watchlist_items()
     if not watchlist_items:
@@ -232,6 +318,7 @@ async def check_watchlist_for_buys(context: ContextTypes.DEFAULT_TYPE):
         symbol = item['coin_symbol']
         item_id = item['id']
         user_id = item['user_id']
+        settings = db.get_user_effective_settings(user_id)
 
         # Check for timeout
         add_time = datetime.datetime.strptime(item['add_timestamp'], '%Y-%m-%d %H:%M:%S')
@@ -250,26 +337,55 @@ async def check_watchlist_for_buys(context: ContextTypes.DEFAULT_TYPE):
             continue
 
         # Check for buy signal (RSI recovery)
-        current_rsi = get_rsi(symbol)
-        if current_rsi and current_rsi > config.RSI_BUY_RECOVERY_THRESHOLD:
+        # Use cache to avoid redundant API calls
+        if symbol not in indicator_cache:
+            try:
+                indicator_cache[symbol] = {'rsi': get_rsi(symbol)}
+                time.sleep(0.1) # Stagger API calls to be safe
+            except BinanceAPIException as e:
+                logger.warning(f"API error getting RSI for watchlist item {symbol}: {e}")
+                continue # Skip this symbol for this run
+
+        cached_data = indicator_cache.get(symbol, {})
+        current_rsi = cached_data.get('rsi')
+
+        if current_rsi and current_rsi > settings.get('RSI_BUY_RECOVERY_THRESHOLD', config.RSI_BUY_RECOVERY_THRESHOLD):
             # We have a buy signal!
-            current_price = get_current_price(symbol)
-            if not current_price:
+            # Use the pre-fetched price
+            buy_price = prices.get(symbol)
+            if not buy_price:
                 logger.warning(f"Could not get price for {symbol} to execute watchlist buy. Will retry.")
                 continue
 
+            # Check user's trading mode
+            user_mode, paper_balance = db.get_user_trading_mode_and_balance(user_id)
+            trade_mode = 'LIVE'
+            trade_size = None
+
+            if user_mode == 'PAPER':
+                trade_mode = 'PAPER'
+                trade_size = config.PAPER_TRADE_SIZE_USDT
+                if paper_balance < trade_size:
+                    logger.info(f"User {user_id} has insufficient paper balance to open trade for {symbol}.")
+                    # Optionally notify user of insufficient paper funds
+                    continue
+                # Deduct from paper balance for the new trade
+                db.update_paper_balance(user_id, -trade_size)
+
             # Log the trade
-            stop_loss_price = current_price * (1 - config.STOP_LOSS_PERCENTAGE / 100)
-            take_profit_price = current_price * (1 + config.PROFIT_TARGET_PERCENTAGE / 100)
-            db.log_trade(user_id=user_id, coin_symbol=symbol, buy_price=current_price, stop_loss=stop_loss_price, take_profit=take_profit_price)
+            stop_loss_price = buy_price * (1 - settings['STOP_LOSS_PERCENTAGE'] / 100)
+            take_profit_price = buy_price * (1 + settings['PROFIT_TARGET_PERCENTAGE'] / 100)
+            db.log_trade(user_id=user_id, coin_symbol=symbol, buy_price=buy_price,
+                         stop_loss=stop_loss_price, take_profit=take_profit_price, # This is a simulated buy, so no real quantity
+                         mode=trade_mode, trade_size_usdt=trade_size)
             db.remove_from_watchlist(item_id)
-            logger.info(f"Executed dip-buy for {symbol} for user {user_id} at price {current_price}")
+            logger.info(f"Executed {trade_mode} dip-buy for {symbol} for user {user_id} at price {buy_price}")
 
             # Notify user
             message = (
                 f"🎯 **Dip Secured!** 🎯\n\n"
-                f"Lunura has opened a new quest for **{symbol}** after spotting a recovery!\n\n"
-                f"   - Bought at: `${current_price:,.8f}`\n"
+                f"Lunessa has opened a new {trade_mode} quest for **{symbol}** after spotting a recovery!\n\n"
+                f"   - Bought at: `${buy_price:,.8f}`\n"
                 f"   - ✅ Take Profit: `${take_profit_price:,.8f}`\n"
                 f"   - 🛡️ Stop Loss: `${stop_loss_price:,.8f}`\n\n"
                 f"Use /status to see your open quests."
@@ -290,71 +406,228 @@ async def monitor_market_and_trades(context: ContextTypes.DEFAULT_TYPE):
         return
 
     logger.info("Running market monitor...")
-    
-    # Part 1: Strategic Market Condition Alert
-    await check_btc_volatility_and_alert(context)
 
-    # Part 1.5: Check watchlist for dip-buy opportunities
-    await check_watchlist_for_buys(context)
-
-    # Part 2: Check individual open trades
-    # 1. Get all unique symbols from open trades to check
-    unique_symbols = db.get_unique_open_trade_symbols()
-    if not unique_symbols:
-        # logger.info("No open trades to monitor.") # Can be noisy, so commented out
-        return
-
-    # 2. Fetch current prices for all needed symbols efficiently
-    prices = {}
-    for symbol in unique_symbols:
-        price = get_current_price(symbol)
-        if price:
-            prices[symbol] = price
+    # --- Step 1: Fetch all market prices in a single batch call ---
+    try:
+        all_tickers = client.get_all_tickers()
+        prices = {item['symbol']: float(item['price']) for item in all_tickers}
+        # Store prices in bot_data for other commands to use as a cache
+        context.bot_data['all_prices'] = {
+            'prices': prices,
+            'timestamp': datetime.datetime.utcnow()
+        }
+    except BinanceAPIException as e:
+        if e.status_code in [429, 418]:
+            logger.warning(f"Rate limit hit during price fetch. Pausing monitor. Message: {e.message}")
         else:
-            logger.warning(f"Could not fetch price for {symbol}, skipping checks for it.")
-
-    if not prices:
-        logger.error("Market monitor failed: Could not fetch price for any open trade symbols.")
+            logger.error(f"API error fetching all tickers: {e}")
+        return # Exit this run
+    except Exception as e:
+        logger.error(f"Generic error fetching all tickers: {e}")
         return
 
-    # 3. Check all open trades for all users
+    # --- Step 2: Initialize a cache for this run to store calculated indicators ---
+    indicator_cache = {}
+
+    # --- Step 3: Run monitoring sub-tasks, passing the fetched data ---
+    await check_btc_volatility_and_alert(context)
+    await check_watchlist_for_buys(context, prices, indicator_cache)
+
+    # --- Step 4: Check individual open trades ---
     open_trades = db.get_all_open_trades()
     for trade in open_trades:
         symbol = trade['coin_symbol']
         if symbol not in prices:
             continue
 
+        settings = db.get_user_effective_settings(trade['user_id'])
+
         current_price = prices[symbol]
         notification = None
         close_reason = None
 
-        pnl_percent = ((current_price - trade['buy_price']) / trade['buy_price']) * 100
+        pnl_percent = ((current_price - trade['buy_price']) / trade['buy_price']) * 100 # type: ignore
+
+        # --- Stop-Loss is the ultimate safety net, check it first ---
         if current_price <= trade['stop_loss_price']:
             notification = f"🛡️ **Stop-Loss Triggered!** Your {symbol} quest (ID: {trade['id']}) was closed at `${current_price:,.8f}` (P/L: {pnl_percent:.2f}%)."
             close_reason = "Stop-Loss"
-        elif current_price >= trade['take_profit_price']:
-            notification = f"🎉 **Take-Profit Hit!** Your {symbol} quest (ID: {trade['id']}) was closed at `${current_price:,.8f}` (P/L: {pnl_percent:.2f}%). Congratulations!"
-            close_reason = "Take-Profit"
+
+        # --- If not stopped out, check profit-taking logic ---
+        else:
+            # --- Premium Feature: Trailing Take Profit ---
+            if settings.get('USE_TRAILING_TAKE_PROFIT'):
+                is_trailing_active = trade['peak_price'] is not None
+
+                if is_trailing_active:
+                    peak_price = trade['peak_price']
+
+                    # Update peak price if a new high is reached
+                    if current_price > peak_price:
+                        db.activate_trailing_stop(trade['id'], current_price)
+                        peak_price = current_price # Update for current iteration
+
+                    # Check if the price dropped below the trailing stop
+                    trailing_stop_price = peak_price * (1 - settings['TRAILING_STOP_DROP_PERCENT'] / 100)
+                    if current_price <= trailing_stop_price:
+                        notification = (
+                            f"📈 **Trailing Stop Triggered!** Your {symbol} quest (ID: {trade['id']}) "
+                            f"was closed at `${current_price:,.8f}` (P/L: {pnl_percent:.2f}%).\n"
+                            f"*Peak price reached: `${peak_price:,.8f}`*"
+                        )
+                        close_reason = "Trailing Stop"
+
+                # --- Trailing Stop Activation Logic ---
+                elif pnl_percent >= settings['TRAILING_PROFIT_ACTIVATION_PERCENT']:
+                    # Activate the trailing stop for the first time
+                    db.activate_trailing_stop(trade['id'], current_price)
+                    logger.info(f"Activated trailing stop for trade {trade['id']} at price {current_price}")
+
+                    # Send a one-time notification to the user
+                    activation_msg = (
+                        f"🔔 **Trailing Stop Activated for {symbol}!** (Quest ID: {trade['id']})\n\n"
+                        f"Your quest has reached **{pnl_percent:.2f}%** profit. I will now secure your gains by trailing the price.\n\n"
+                        f"The stop will adjust upwards as the price rises."
+                    )
+                    try:
+                        await context.bot.send_message(chat_id=trade['user_id'], text=activation_msg, parse_mode='Markdown')
+                    except Exception as e:
+                        logger.error(f"Failed to send trailing stop activation message to user {trade['user_id']}: {e}")
+
+                # --- Fallback to fixed Take-Profit if trailing is not yet active ---
+                elif current_price >= trade['take_profit_price']:
+                    notification = f"🎉 **Take-Profit Hit!** Your {symbol} quest (ID: {trade['id']}) was closed at `${current_price:,.8f}` (P/L: {pnl_percent:.2f}%). Congratulations!"
+                    close_reason = "Take-Profit"
+
+            # --- Logic for FREE users (or if trailing is disabled) ---
+            elif current_price >= trade['take_profit_price']:
+                notification = f"🎉 **Take-Profit Hit!** Your {symbol} quest (ID: {trade['id']}) was closed at `${current_price:,.8f}` (P/L: {pnl_percent:.2f}%). Congratulations!"
+                close_reason = "Take-Profit"
 
         if notification:
             logger.info(f"Closing trade {trade['id']} for user {trade['user_id']} due to: {close_reason}")
-            db.close_trade(trade_id=trade['id'], user_id=trade['user_id'], sell_price=current_price)
+            
+            # --- Trade Execution Logic ---
+            if trade['mode'] == 'LIVE':
+                if trade['quantity'] and trade['quantity'] > 0:
+                    user_client = get_user_client(trade['user_id'])
+                    if user_client:
+                        try:
+                            logger.info(f"Attempting to place MARKET SELL for {trade['quantity']} {symbol} for user {trade['user_id']}")
+                            # IMPORTANT: This places a real order on Binance
+                            order = user_client.order_market_sell(symbol=symbol, quantity=trade['quantity'])
+                            logger.info(f"Successfully executed market sell for trade {trade['id']}. Order ID: {order['orderId']}")
+                            # Add execution confirmation to the notification
+                            notification += "\n\n**✅ Successfully executed on Binance.**"
+                            db.close_trade(trade_id=trade['id'], user_id=trade['user_id'], sell_price=current_price)
+                        except BinanceAPIException as e:
+                            logger.error(f"Binance API error executing sell for trade {trade['id']}: {e}")
+                            notification += f"\n\n**⚠️ Binance Execution FAILED:** `{e.message}`. Please close the trade manually."
+                        except Exception as e:
+                            logger.error(f"Generic error executing sell for trade {trade['id']}: {e}")
+                            notification += "\n\n**⚠️ An unknown error occurred during execution.** Please check Binance manually."
+                    else:
+                        notification += "\n\n**⚠️ Execution FAILED:** Could not create Binance client for user."
+                else:
+                    logger.warning(f"Cannot execute LIVE sell for trade {trade['id']}: quantity not available.")
+                    notification += "\n\n**⚠️ Execution SKIPPED:** The quantity for this trade was not recorded. Please close manually."
+            
+            elif trade['mode'] == 'PAPER':
+                # Close the paper trade in the DB
+                success = db.close_trade(trade_id=trade['id'], user_id=trade['user_id'], sell_price=current_price)
+                if success:
+                    # Update the paper balance
+                    profit_or_loss = (current_price - trade['buy_price']) * (trade['trade_size_usdt'] / trade['buy_price'])
+                    db.update_paper_balance(trade['user_id'], profit_or_loss)
+                    logger.info(f"Updated paper balance for user {trade['user_id']} by ${profit_or_loss:.2f}")
+                    notification += "\n\n*This was a paper trade.*"
+
+            # Send the final notification to the user
             try:
                 await context.bot.send_message(chat_id=trade['user_id'], text=notification, parse_mode='Markdown')
             except Exception as e:
-                logger.error(f"Failed to send auto-close notification to user {trade['user_id']}: {e}")
+                logger.error(f"Failed to send final trade close notification to user {trade['user_id']}: {e}")
+
+        # --- Premium Feature: Bollinger Bands Intelligence ---
+        if settings.get('USE_BOLLINGER_BANDS') and not notification: # Only if trade is still open
+            # Check cache for indicators first
+            if symbol not in indicator_cache:
+                try:
+                    # Calculate and cache indicators for this symbol
+                    rsi = get_rsi(symbol)
+                    upper, mid, lower, std = get_bollinger_bands(symbol, period=settings.get('BOLL_PERIOD', 20), std_dev=settings.get('BOLL_STD_DEV', 2))
+                    indicator_cache[symbol] = {'rsi': rsi, 'bbands': (upper, mid, lower, std)}
+                    time.sleep(0.1) # Stagger API calls
+                except BinanceAPIException as e:
+                    if e.status_code in [429, 418]:
+                        logger.warning(f"Rate limit hit fetching indicators for {symbol}. Skipping symbol for this run.")
+                    else:
+                        logger.error(f"API error fetching indicators for {symbol}: {e}")
+                    continue # Skip this trade for this run
+                except Exception as e:
+                    logger.error(f"Generic error fetching indicators for {symbol}: {e}")
+                    continue
+
+            cached_data = indicator_cache.get(symbol, {})
+            upper_band, middle_band, lower_band, std = cached_data.get('bbands', (None, None, None, None))
+            if upper_band and middle_band and lower_band: # Check if we got valid data
+                # 1. Upper Band Alert
+                boll_alert_key = f"boll_alert_{trade['id']}"
+                if current_price >= upper_band and not context.bot_data.get(boll_alert_key, False):
+                    alert_message = (
+                        f"📈 **Volatility Alert for {symbol}** (Quest ID: {trade['id']}) 📈\n\n"
+                        f"The price has touched or broken the upper Bollinger Band at `${upper_band:,.8f}`.\n\n"
+                        f"This indicates high volatility. Consider tightening your stop-loss or taking profits. Your current P/L is **{pnl_percent:.2f}%**."
+                    )
+                    try:
+                        await context.bot.send_message(chat_id=trade['user_id'], text=alert_message, parse_mode='Markdown')
+                        context.bot_data[boll_alert_key] = True
+                        logger.info(f"Sent Bollinger Upper Band alert for trade {trade['id']}")
+                    except Exception as e:
+                        logger.error(f"Failed to send Bollinger alert for trade {trade['id']}: {e}")
+                elif current_price < middle_band and context.bot_data.get(boll_alert_key, False):
+                    # Reset the alert flag once the price returns to the middle band
+                    context.bot_data[boll_alert_key] = False
+                    logger.info(f"Reset Bollinger Upper Band alert flag for trade {trade['id']}.")
+
+                # 2. Squeeze Expansion Alert
+                squeeze_alert_key = f"squeeze_alert_{symbol}_{trade['user_id']}" # Per user, per symbol
+                if settings.get('BOLL_SQUEEZE_ALERT_ENABLED'):
+                    band_width = (upper_band - lower_band) / middle_band
+                    is_squeezing = band_width < settings.get('BOLL_SQUEEZE_THRESHOLD', 0.08)
+
+                    if is_squeezing and not context.bot_data.get(squeeze_alert_key, False):
+                        context.bot_data[squeeze_alert_key] = True
+                        logger.info(f"Bollinger Squeeze detected for {symbol} for user {trade['user_id']}. Awaiting expansion.")
+                    elif not is_squeezing and context.bot_data.get(squeeze_alert_key, False):
+                        alert_message = f"💥 **Volatility Expansion for {symbol}** 💥\n\n" \
+                                        "The Bollinger Bands are expanding after a squeeze. Expect a significant price move soon. Please monitor your positions."
+                        try:
+                            await context.bot.send_message(chat_id=trade['user_id'], text=alert_message, parse_mode='Markdown')
+                            logger.info(f"Sent Bollinger Squeeze expansion alert for {symbol} to user {trade['user_id']}")
+                        except Exception as e:
+                            logger.error(f"Failed to send squeeze alert for {symbol} to user {trade['user_id']}: {e}")
+                        finally:
+                            context.bot_data[squeeze_alert_key] = False
 
         # Part 3: Proactive RSI-based sell suggestion (if the trade is still open)
         if not notification:
             trade_suggestion_key = f"suggestion_{trade['id']}"
-            current_rsi = get_rsi(symbol)
 
-            if current_rsi and current_rsi > config.RSI_SELL_THRESHOLD:
+            # Use cached RSI if available, otherwise fetch it
+            if symbol in indicator_cache and 'rsi' in indicator_cache[symbol]:
+                current_rsi = indicator_cache[symbol]['rsi']
+            else:
+                current_rsi = get_rsi(symbol)
+                if symbol not in indicator_cache: indicator_cache[symbol] = {}
+                indicator_cache[symbol]['rsi'] = current_rsi
+
+            if current_rsi and current_rsi > settings['RSI_SELL_THRESHOLD']:
                 # If we haven't already sent a suggestion for this high-RSI state
                 if not context.bot_data.get(trade_suggestion_key, False):
                     suggestion_message = (
                         f"💡 **Strategic Suggestion for {symbol}** (Quest ID: {trade['id']}) 💡\n\n"
-                        f"The hourly RSI is now **{current_rsi:.2f}**, which is above the sell threshold of {config.RSI_SELL_THRESHOLD}.\n\n"
+                        f"The hourly RSI is now **{current_rsi:.2f}**, which is above the sell threshold of {settings['RSI_SELL_THRESHOLD']}.\n\n"
                         f"You might consider taking profits. Your current P/L is **{pnl_percent:.2f}%**.\n\n"
                         f"To close this quest, use: `/close {trade['id']}`"
                     )
@@ -387,10 +660,6 @@ async def import_last_trade_command(update: Update, context: ContextTypes.DEFAUL
     /import <SYMBOL> - Fetches last trade from Binance.
     /import <SYMBOL> <PRICE> - Logs a trade at a specific price.
     """
-    if not client:
-        await update.message.reply_text("The connection to the crypto realm (Binance) is not configured.")
-        return
-
     if not context.args:
         await update.message.reply_text("Please specify a trading pair. Usage: `/import CTKUSDT` or `/import CTKUSDT 0.75`", parse_mode='Markdown')
         return
@@ -408,19 +677,26 @@ async def import_last_trade_command(update: Update, context: ContextTypes.DEFAUL
             return
 
     user_id = update.effective_user.id
+    settings = db.get_user_effective_settings(user_id)
 
     if db.is_trade_open(user_id, symbol):
         await update.message.reply_text(f"You already have an open quest for {symbol}. Use /status to see it.")
         return
 
     buy_price = 0.0
+    quantity = None
 
     if manual_price is not None:
         buy_price = manual_price
         await update.message.reply_text(f"Manually logging your {symbol} quest at a price of `${buy_price:,.8f}`... ✍️")
     else:
+        api_key, _ = db.get_user_api_keys(user_id)
+        if not api_key:
+            await update.message.reply_text("To import from Binance, your API keys must be set. Please use `/setapi <key> <secret>` in a private chat with me.")
+            return
+
         await update.message.reply_text(f"Searching your Binance history for your last {symbol} spot trade... 📜")
-        last_trade = get_last_trade_from_binance(symbol)
+        last_trade = get_last_trade_from_binance(user_id, symbol)
 
         if not last_trade:
             await update.message.reply_text(
@@ -441,12 +717,22 @@ async def import_last_trade_command(update: Update, context: ContextTypes.DEFAUL
             return
 
         buy_price = float(last_trade['price'])
+        quantity = float(last_trade['qty'])
 
     # Log the trade (common for both manual and automatic imports)
-    stop_loss_price = buy_price * (1 - config.STOP_LOSS_PERCENTAGE / 100)
-    take_profit_price = buy_price * (1 + config.PROFIT_TARGET_PERCENTAGE / 100)
+    stop_loss_price = buy_price * (1 - settings['STOP_LOSS_PERCENTAGE'] / 100)
+    take_profit_price = buy_price * (1 + settings['PROFIT_TARGET_PERCENTAGE'] / 100)
 
-    db.log_trade(user_id=user_id, coin_symbol=symbol, buy_price=buy_price, stop_loss=stop_loss_price, take_profit=take_profit_price)
+    # Check user's trading mode for imported trades
+    # Imported trades are always considered 'LIVE' unless user is in paper mode
+    user_mode, _ = db.get_user_trading_mode_and_balance(user_id) 
+    trade_mode = 'LIVE'
+    trade_size = None
+    if user_mode == 'PAPER':
+        trade_mode = 'PAPER'
+        trade_size = config.PAPER_TRADE_SIZE_USDT
+
+    db.log_trade(user_id=user_id, coin_symbol=symbol, buy_price=buy_price, stop_loss=stop_loss_price, take_profit=take_profit_price, mode=trade_mode, trade_size_usdt=trade_size, quantity=quantity)
 
     message = (
         f"✅ **Quest Imported!**\n\n"
