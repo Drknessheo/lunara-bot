@@ -104,19 +104,19 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             for symbol in symbols_to_fetch_now:
                 prices[symbol] = trade.get_current_price(symbol) # Fallback to individual API call
 
-        for trade in open_trades:
-            symbol = trade['coin_symbol']
-            buy_price = trade['buy_price']
+        for trade_item in open_trades:
+            symbol = trade_item['coin_symbol']
+            buy_price = trade_item['buy_price']
             current_price = prices.get(symbol)
 
-            message += f"\n🔹 **{symbol}** (ID: {trade['id']})"
+            message += f"\n🔹 **{symbol}** (ID: {trade_item['id']})"
 
             if current_price:
                 pnl_percent = ((current_price - buy_price) / buy_price) * 100
                 pnl_emoji = "📈" if pnl_percent >= 0 else "📉"
                 
                 # Calculate progress to Take Profit
-                tp_price = trade['take_profit_price']
+                tp_price = trade_item['take_profit_price']
                 total_gain_needed = tp_price - buy_price
                 current_gain = current_price - buy_price
                 progress_str = ""
@@ -129,7 +129,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     f"\n   Bought: `${buy_price:,.8f}`"
                     f"\n   Current: `${current_price:,.8f}`"
                     f"\n   ✅ Target: `${tp_price:,.8f}`{progress_str}"
-                    f"\n   🛡️ Stop: `${trade['stop_loss_price']:,.8f}`"
+                    f"\n   🛡️ Stop: `${trade_item['stop_loss_price']:,.8f}`"
                 )
             else:
                 message += "\n   _(Could not fetch current price)_"
