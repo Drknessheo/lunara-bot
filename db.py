@@ -100,6 +100,16 @@ def migrate_schema():
         cursor.execute("ALTER TABLE users ADD COLUMN paper_balance REAL DEFAULT 10000.0")
         changes_made = True
     
+    # Migration for custom user settings columns
+    if 'custom_stop_loss' not in user_columns:
+        logger.info("Migrating database: Adding custom setting columns to 'users' table.")
+        cursor.execute("ALTER TABLE users ADD COLUMN custom_rsi_buy REAL")
+        cursor.execute("ALTER TABLE users ADD COLUMN custom_rsi_sell REAL")
+        cursor.execute("ALTER TABLE users ADD COLUMN custom_stop_loss REAL")
+        cursor.execute("ALTER TABLE users ADD COLUMN custom_trailing_activation REAL")
+        cursor.execute("ALTER TABLE users ADD COLUMN custom_trailing_drop REAL")
+        changes_made = True
+
     if 'quantity' not in trade_columns:
         logger.info("Migrating database: Adding 'quantity' column to 'trades' table.")
         cursor.execute("ALTER TABLE trades ADD COLUMN quantity REAL")
@@ -415,10 +425,18 @@ def store_user_api_keys(user_id: int, api_key: str, secret_key: str):
     conn.close()
 
 def get_user_api_keys(user_id: int) -> tuple[str | None, str | None]:
-    """Retrieves and decrypts a user's Binance API keys."""
+    """
+    Retrieves and decrypts a user's Binance API keys.
+    For the admin user, it returns the keys directly from the .env configuration.
+    """
+    # As the father of the bot, you get your keys directly from the sacred .env scroll.
+    if user_id == config.ADMIN_USER_ID:
+        return config.BINANCE_API_KEY, config.BINANCE_SECRET_KEY
+
     conn = get_db_connection()
     row = conn.execute("SELECT api_key, secret_key FROM users WHERE user_id = ?", (user_id,)).fetchone()
     conn.close()
+
     if not row or not row['api_key'] or not row['secret_key']:
         return None, None
 

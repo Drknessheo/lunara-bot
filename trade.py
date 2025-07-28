@@ -1,7 +1,7 @@
 import logging
 import numpy as np
 import time
-import datetime
+from datetime import datetime, timezone
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 from telegram import Update
@@ -12,6 +12,10 @@ import db
 
 logger = logging.getLogger(__name__)
 
+class TradeError(Exception):
+    """Custom exception for trading errors that can be shown to the user."""
+    pass
+
 # Initialize Binance client
 if config.BINANCE_API_KEY and config.BINANCE_SECRET_KEY:
     client = Client(config.BINANCE_API_KEY, config.BINANCE_SECRET_KEY)
@@ -21,14 +25,6 @@ else:
 
 def get_user_client(user_id: int):
     """Creates a Binance client instance for a specific user using their stored keys."""
-    # For the admin, use the globally configured API keys from the .env file.
-    if user_id == config.ADMIN_USER_ID:
-        if client:
-            return client
-        else:
-            logger.error("Admin action failed: Global Binance API keys are not configured in .env")
-            return None
-
     api_key, secret_key = db.get_user_api_keys(user_id)
     if not api_key or not secret_key:
         logger.warning(f"API keys not found for user {user_id}.")
@@ -42,7 +38,7 @@ def get_user_client(user_id: int):
 def is_weekend():
     """Checks if the current day is Saturday or Sunday (UTC)."""
     # weekday() returns 5 for Saturday, 6 for Sunday
-    return datetime.datetime.utcnow().weekday() >= 5
+    return datetime.now(timezone.utc).weekday() >= 5
 
 def get_current_price(symbol: str):
     """Fetches the current price of a given symbol from Binance."""
@@ -106,14 +102,15 @@ def get_account_balance(user_id: int, asset="USDT"):
     if not user_client:
         return None
     try:
-        balance = user_client.get_asset_balance(asset=asset) # type: ignore
+        balance = user_client.get_asset_balance(asset=asset)
         return float(balance['free']) if balance else 0.0
     except BinanceAPIException as e:
         logger.error(f"Binance API error getting account balance for user {user_id}: {e}")
-        return None
+        # Pass the specific error message up to the command handler
+        raise TradeError(f"Binance API Error: {e.message}")
     except Exception as e:
         logger.error(f"An unexpected error occurred getting account balance for user {user_id}: {e}")
-        return None
+        raise TradeError(f"An unexpected error occurred: {e}")
 
 def get_last_trade_from_binance(user_id: int, symbol: str):
     """Fetches the user's most recent trade for a given symbol from Binance."""
@@ -131,6 +128,37 @@ def get_last_trade_from_binance(user_id: int, symbol: str):
     except Exception as e:
         logger.error(f"An unexpected error occurred getting last trade for {symbol} for user {user_id}: {e}")
         return None
+
+def place_buy_order(user_id: int, symbol: str, usdt_amount: float):
+    """Places a live market buy order on Binance for a specific user."""
+    user_client = get_user_client(user_id)
+    if not user_client:
+        logger.error(f"Cannot place buy order for user {user_id}: client not available.")
+        raise TradeError("Binance client is not available. Please check your API keys.")
+
+    try:
+        logger.info(f"Attempting to BUY {usdt_amount} USDT of {symbol} for user {user_id}...")
+        # Use quoteOrderQty for market buys to specify the amount in USDT
+        order = user_client.create_order( # type: ignore
+            symbol=symbol,
+            side=Client.SIDE_BUY,
+            type=Client.ORDER_TYPE_MARKET,
+            quoteOrderQty=usdt_amount
+        )
+        logger.info(f"LIVE BUY order successful for {symbol} for user {user_id}: {order}")
+
+        # Extract details from the fill(s)
+        entry_price = float(order['fills'][0]['price'])
+        quantity = float(order['executedQty'])
+        
+        return order, entry_price, quantity
+
+    except BinanceAPIException as e:
+        logger.error(f"LIVE BUY order failed for {symbol} for user {user_id}: {e.message}")
+        raise TradeError(f"Binance API Error: {e.message}")
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during LIVE BUY for {symbol} for user {user_id}: {e}")
+        raise TradeError(f"An unexpected error occurred: {e}")
 
 async def quest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -233,11 +261,13 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     
     await update.message.reply_text("Checking your treasure chest (Binance)...")
-    balance = get_account_balance(user_id, asset="USDT")
-    if balance is not None:
-        await update.message.reply_text(f"You hold **{balance:.2f} USDT**.", parse_mode='Markdown')
-    else:
-        await update.message.reply_text("Could not retrieve your balance. Please check your API key permissions on Binance.")
+    try:
+        balance = get_account_balance(user_id, asset="USDT")
+        if balance is not None:
+            await update.message.reply_text(f"You hold **{balance:.2f} USDT**.", parse_mode='Markdown')
+    except TradeError as e:
+        # This will now catch the specific error message from the API
+        await update.message.reply_text(f"Could not retrieve your balance.\n\n*Reason:* `{e}`\n\nPlease check your API key permissions and IP restrictions on Binance.", parse_mode='Markdown')
 
 async def check_btc_volatility_and_alert(context: ContextTypes.DEFAULT_TYPE):
     """
@@ -310,12 +340,12 @@ async def check_watchlist_for_buys(context: ContextTypes.DEFAULT_TYPE, prices: d
     if not watchlist_items:
         return
 
-    logger.info(f"Checking {len(watchlist_items)} item(s) on the watchlist for dip-buy opportunities...")
+    logger.info(f"Checking {len(watchlist_items)} item(s) on the watchlist for dip-buy opportunities...") # type: ignore
 
-    now = datetime.datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     for item in watchlist_items:
-        symbol = item['coin_symbol']
+        symbol = item['coin_symbol'] # type: ignore
         item_id = item['id']
         user_id = item['user_id']
         settings = db.get_user_effective_settings(user_id)
@@ -344,7 +374,7 @@ async def check_watchlist_for_buys(context: ContextTypes.DEFAULT_TYPE, prices: d
                 time.sleep(0.1) # Stagger API calls to be safe
             except BinanceAPIException as e:
                 logger.warning(f"API error getting RSI for watchlist item {symbol}: {e}")
-                continue # Skip this symbol for this run
+                continue # Skip this symbol for this run # type: ignore
 
         cached_data = indicator_cache.get(symbol, {})
         current_rsi = cached_data.get('rsi')
@@ -358,42 +388,74 @@ async def check_watchlist_for_buys(context: ContextTypes.DEFAULT_TYPE, prices: d
                 continue
 
             # Check user's trading mode
-            user_mode, paper_balance = db.get_user_trading_mode_and_balance(user_id)
-            trade_mode = 'LIVE'
-            trade_size = None
+            mode, paper_balance = db.get_user_trading_mode_and_balance(user_id)
 
-            if user_mode == 'PAPER':
-                trade_mode = 'PAPER'
-                trade_size = config.PAPER_TRADE_SIZE_USDT
-                if paper_balance < trade_size:
+            # --- LIVE TRADING LOGIC ---
+            if mode == 'LIVE':
+                # Check live balance
+                usdt_balance = get_account_balance(user_id, 'USDT')
+                if usdt_balance is None or usdt_balance < 10: # Use a minimum trade value like 10 USDT
+                     logger.info(f"User {user_id} has insufficient LIVE USDT balance ({usdt_balance}) to open trade for {symbol}.")
+                     continue
+                
+                # Use a fixed trade size for now. This can be made a user setting later.
+                trade_size_usdt = 12.0
+                if usdt_balance < trade_size_usdt:
+                    trade_size_usdt = usdt_balance # Use what's available if less than desired
+
+                try:
+                    order, entry_price, quantity = place_buy_order(user_id, symbol, trade_size_usdt)
+
+                    stop_loss_price = entry_price * (1 - settings['STOP_LOSS_PERCENTAGE'] / 100)
+                    take_profit_price = entry_price * (1 + settings['PROFIT_TARGET_PERCENTAGE'] / 100)
+                    db.log_trade(user_id=user_id, coin_symbol=symbol, buy_price=entry_price,
+                                 stop_loss=stop_loss_price, take_profit=take_profit_price,
+                                 mode='LIVE', quantity=quantity)
+                    db.remove_from_watchlist(item_id)
+                    logger.info(f"Executed LIVE dip-buy for {symbol} for user {user_id} at price {entry_price}")
+
+                    # Notify user
+                    message = (
+                        f"🎯 **Live Quest Started!** 🎯\n\n"
+                        f"Lunessa has executed a **LIVE** buy for **{quantity:.4f} {symbol}** after spotting a recovery!\n\n"
+                        f"   - Bought at: `${entry_price:,.8f}`\n"
+                        f"   - ✅ Take Profit: `${take_profit_price:,.8f}`\n"
+                        f"   - 🛡️ Stop Loss: `${stop_loss_price:,.8f}`\n\n"
+                        f"Use /status to see your open quests."
+                    )
+                    await context.bot.send_message(chat_id=user_id, text=message, parse_mode='Markdown')
+                except TradeError as e:
+                    await context.bot.send_message(
+                        chat_id=user_id, text=f"⚠️ **Live Buy FAILED** for {symbol}.\n\n*Reason:* `{e}`\n\nPlease check your account balance and API key permissions.", parse_mode='Markdown'
+                    )
+
+            # --- PAPER TRADING LOGIC ---
+            elif mode == 'PAPER':
+                trade_size_usdt = config.PAPER_TRADE_SIZE_USDT
+                if paper_balance < trade_size_usdt:
                     logger.info(f"User {user_id} has insufficient paper balance to open trade for {symbol}.")
-                    # Optionally notify user of insufficient paper funds
                     continue
-                # Deduct from paper balance for the new trade
-                db.update_paper_balance(user_id, -trade_size)
-
-            # Log the trade
-            stop_loss_price = buy_price * (1 - settings['STOP_LOSS_PERCENTAGE'] / 100)
-            take_profit_price = buy_price * (1 + settings['PROFIT_TARGET_PERCENTAGE'] / 100)
-            db.log_trade(user_id=user_id, coin_symbol=symbol, buy_price=buy_price,
-                         stop_loss=stop_loss_price, take_profit=take_profit_price, # This is a simulated buy, so no real quantity
-                         mode=trade_mode, trade_size_usdt=trade_size)
-            db.remove_from_watchlist(item_id)
-            logger.info(f"Executed {trade_mode} dip-buy for {symbol} for user {user_id} at price {buy_price}")
-
-            # Notify user
-            message = (
-                f"🎯 **Dip Secured!** 🎯\n\n"
-                f"Lunessa has opened a new {trade_mode} quest for **{symbol}** after spotting a recovery!\n\n"
-                f"   - Bought at: `${buy_price:,.8f}`\n"
-                f"   - ✅ Take Profit: `${take_profit_price:,.8f}`\n"
-                f"   - 🛡️ Stop Loss: `${stop_loss_price:,.8f}`\n\n"
-                f"Use /status to see your open quests."
-            )
-            try:
+                
+                db.update_paper_balance(user_id, -trade_size_usdt)
+                
+                entry_price = buy_price # For paper trades, we use the fetched market price
+                stop_loss_price = entry_price * (1 - settings['STOP_LOSS_PERCENTAGE'] / 100)
+                take_profit_price = entry_price * (1 + settings['PROFIT_TARGET_PERCENTAGE'] / 100)
+                db.log_trade(user_id=user_id, coin_symbol=symbol, buy_price=entry_price,
+                             stop_loss=stop_loss_price, take_profit=take_profit_price,
+                             mode='PAPER', trade_size_usdt=trade_size_usdt)
+                db.remove_from_watchlist(item_id)
+                logger.info(f"Executed PAPER dip-buy for {symbol} for user {user_id} at price {entry_price}")
+                
+                message = (
+                    f"🎯 **Paper Quest Started!** 🎯\n\n"
+                    f"Lunessa has opened a new **PAPER** quest for **{symbol}** after spotting a recovery!\n\n"
+                    f"   - Bought at: `${entry_price:,.8f}`\n"
+                    f"   - ✅ Take Profit: `${take_profit_price:,.8f}`\n"
+                    f"   - 🛡️ Stop Loss: `${stop_loss_price:,.8f}`\n\n"
+                    f"Use /status to see your open quests."
+                )
                 await context.bot.send_message(chat_id=user_id, text=message, parse_mode='Markdown')
-            except Exception as e:
-                logger.error(f"Failed to send dip-buy notification to user {user_id}: {e}")
 
 async def monitor_market_and_trades(context: ContextTypes.DEFAULT_TYPE):
     """
@@ -413,8 +475,8 @@ async def monitor_market_and_trades(context: ContextTypes.DEFAULT_TYPE):
         prices = {item['symbol']: float(item['price']) for item in all_tickers}
         # Store prices in bot_data for other commands to use as a cache
         context.bot_data['all_prices'] = {
-            'prices': prices,
-            'timestamp': datetime.datetime.utcnow()
+            'prices': prices, # type: ignore
+            'timestamp': datetime.now(timezone.utc)
         }
     except BinanceAPIException as e:
         if e.status_code in [429, 418]:
@@ -519,7 +581,6 @@ async def monitor_market_and_trades(context: ContextTypes.DEFAULT_TYPE):
                             logger.info(f"Successfully executed market sell for trade {trade['id']}. Order ID: {order['orderId']}")
                             # Add execution confirmation to the notification
                             notification += "\n\n**✅ Successfully executed on Binance.**"
-                            db.close_trade(trade_id=trade['id'], user_id=trade['user_id'], sell_price=current_price)
                         except BinanceAPIException as e:
                             logger.error(f"Binance API error executing sell for trade {trade['id']}: {e}")
                             notification += f"\n\n**⚠️ Binance Execution FAILED:** `{e.message}`. Please close the trade manually."

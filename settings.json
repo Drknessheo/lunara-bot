@@ -1,0 +1,17 @@
+{
+    // Exclude the venv folder from Python code analysis and linting.
+    "python.analysis.exclude": [
+        "**/venv*/**"
+    ],
+    // Exclude the venv folder from VS Code's file watcher.
+    // This is the biggest performance boost.
+    "files.watcherExclude": {
+        "**/.git/objects/**": true,
+        "**/.git/subtree-cache/**": true,
+        "**/venv*/**": true
+    },
+    // Exclude the venv folder from search results.
+    "search.exclude": {
+        "**/venv*": true
+    }
+}

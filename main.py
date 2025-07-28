@@ -1,8 +1,9 @@
 import logging
-import datetime
+from datetime import datetime, timezone
 from telegram import Update, Chat
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
+import google.generativeai as genai
 
 import config
 import db
@@ -13,6 +14,14 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# --- AI Configuration ---
+if config.GEMINI_API_KEY:
+    genai.configure(api_key=config.GEMINI_API_KEY)
+    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+else:
+    model = None
+    logger.warning("GEMINI_API_KEY not found. The /ask command will be disabled.")
 
 # --- Command Handlers ---
 async def linkbinance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -40,15 +49,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message when the /start command is issued."""
     user_id = update.effective_user.id
     db.get_or_create_user(user_id) # Ensure user is in the DB
-
-    # --- Admin Auto-Key Loading Logic ---
-    if user_id == config.ADMIN_USER_ID:
-        # Check if admin keys are already stored in the DB
-        api_key, _ = db.get_user_api_keys(user_id)
-        # If not stored, and they exist in the .env config
-        if not api_key and config.BINANCE_API_KEY and config.BINANCE_SECRET_KEY:
-            logger.info(f"Admin user {user_id} detected. Storing API keys from .env file...")
-            db.store_user_api_keys(user_id, config.BINANCE_API_KEY, config.BINANCE_SECRET_KEY)
 
     user = update.effective_user
     await update.message.reply_html(
@@ -91,7 +91,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             cache_timestamp = cached_prices_data.get('timestamp')
 
             # Cache is valid if it's less than 65 seconds old (job runs every 60s)
-            if cache_timestamp and (datetime.datetime.utcnow() - cache_timestamp).total_seconds() < 65:
+            if cache_timestamp and (datetime.now(timezone.utc) - cache_timestamp).total_seconds() < 65:
                 logger.info(f"Using cached prices for /status for user {user_id}.")
                 for symbol in symbols_to_fetch:
                     if symbol in cached_prices:
@@ -140,8 +140,8 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         message += "\n🔭 **Your Watched Symbols:**\n"
         for item in watched_items:
             # Calculate time since added
-            add_time = datetime.datetime.strptime(item['add_timestamp'], '%Y-%m-%d %H:%M:%S')
-            time_watching = datetime.datetime.utcnow() - add_time
+            add_time = datetime.strptime(item['add_timestamp'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+            time_watching = datetime.now(timezone.utc) - add_time
             hours, remainder = divmod(time_watching.total_seconds(), 3600)
             minutes, _ = divmod(remainder, 60)
             message += (
@@ -317,13 +317,16 @@ Here are the commands to guide your journey:
 
 <b>--- Account & Setup ---</b>
 <b>/start</b> - Begin your journey
-<b>/setapi</b> <code>KEY SECRET</code> - Link your API keys (in private chat)
+<b>/setapi</b> <code>KEY SECRET</code> - Link your Binance keys (in private chat)
+<b>/linkbinance</b> - Instructions for creating API keys
 <b>/myprofile</b> - View your profile and settings
+<b>/settings</b> - [Premium] Customize your trading parameters
 <b>/subscribe</b> - See premium benefits and how to upgrade
 
 <b>--- Trading & Analysis ---</b>
 <b>/quest</b> <code>SYMBOL</code> - Scan a crypto pair for opportunities
 <b>/status</b> - View your open trades and watchlist
+<b>/balance</b> - Check your LIVE or PAPER balance
 <b>/close</b> <code>ID</code> - Manually complete a quest (trade)
 <b>/import</b> <code>SYMBOL [PRICE]</code> - Log an existing trade
 <b>/papertrade</b> - Toggle practice mode
@@ -334,6 +337,8 @@ Here are the commands to guide your journey:
 <b>/leaderboard</b> - See the global top 3 trades
 
 <b>--- General ---</b>
+<b>/ask</b> <code>QUESTION</code> - Ask the AI Oracle about trading
+<b>/learn</b> - Get quick educational tips
 <b>/pay</b> - See how to support Lunessa's development
 <b>/safety</b> - Read important trading advice
 <b>/resonate</b> - A word of wisdom from Lunessa
@@ -406,17 +411,20 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text("Invalid format. Usage: `/settings <name> <value>`", parse_mode='Markdown')
         return
 
-    if setting_name not in db.SETTING_TO_COLUMN_MAP:
-        await update.message.reply_text(f"Unknown setting '{setting_name}'. Valid settings are: {', '.join(db.SETTING_TO_COLUMN_MAP.keys())}")
-        return
+    try:
+        if setting_name not in db.SETTING_TO_COLUMN_MAP:
+            await update.message.reply_text(f"Unknown setting '{setting_name}'. Valid settings are: {', '.join(db.SETTING_TO_COLUMN_MAP.keys())}")
+            return
 
-    new_value = None if value_str == 'reset' else float(value_str)
-    if new_value is not None and new_value <= 0:
-        await update.message.reply_text("Value must be a positive number.")
-        return
-    
-    db.update_user_setting(user_id, setting_name, new_value)
-    await update.message.reply_text(f"✅ Successfully updated **{setting_name}** to **{value_str}**.")
+        new_value = None if value_str == 'reset' else float(value_str)
+        if new_value is not None and new_value <= 0:
+            await update.message.reply_text("Value must be a positive number.")
+            return
+        
+        db.update_user_setting(user_id, setting_name, new_value)
+        await update.message.reply_text(f"✅ Successfully updated **{setting_name}** to **{value_str}**.")
+    except ValueError:
+        await update.message.reply_text(f"Invalid value '{value_str}'. Please provide a number (e.g., 8.5) or 'reset'.")
 
 async def pay_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Shows donation and premium access information."""
@@ -619,6 +627,35 @@ async def papertrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"Unknown command. Use `/papertrade` to see available options."
         )
 
+async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Answers user questions using the Gemini AI model."""
+    if not model:
+        await update.message.reply_text("The AI Oracle is currently unavailable. Please check the bot's configuration.")
+        return
+
+    question = " ".join(context.args)
+    if not question:
+        await update.message.reply_text("What knowledge do you seek? Usage: `/ask <your question about trading>`", parse_mode='Markdown')
+        return
+
+    await update.message.reply_text("Lunessa is consulting the cosmic AI oracle... 🧠✨")
+
+    try:
+        user_name = update.effective_user.first_name
+        # Add some context to the prompt to guide the AI
+        prompt = (
+            "You are a helpful crypto trading assistant named Lunessa. "
+            f"A user named {user_name} has asked the following question. Greet them by name. Provide a clear, concise, and helpful answer. "
+            "Do not give financial advice. Frame your answer from the perspective of a wise trading sorceress.\n\n"
+            f"Question: {question}"
+        )
+        # The google-generativeai library's generate_content_async is awaitable
+        response = await model.generate_content_async(prompt)
+        await update.message.reply_text(response.text, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error calling Gemini API: {e}")
+        await update.message.reply_text("The cosmic energies are scrambled. I could not get an answer at this time.")
+
 
 def main() -> None:
     """Start the bot."""
@@ -652,6 +689,7 @@ def main() -> None:
     application.add_handler(CommandHandler("hubspeedy", hubspeedy_command))
     application.add_handler(CommandHandler("linkbinance", linkbinance_command))
     application.add_handler(CommandHandler("learn", learn_command))
+    application.add_handler(CommandHandler("ask", ask_command))
 
     # --- Set up background jobs ---
     job_queue = application.job_queue

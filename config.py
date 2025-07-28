@@ -10,6 +10,8 @@ BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
 CHAT_ID = os.getenv("CHAT_ID") # For global bot alerts
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID")) if os.getenv("ADMIN_USER_ID") else None
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GDRIVE_REMOTE_NAME = os.getenv("GDRIVE_REMOTE_NAME") # For database backups
 
 # --- Database Configuration ---
 DB_NAME = "sprttrade.db" # Can be moved to .env if needed
