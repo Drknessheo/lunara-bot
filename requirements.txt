@@ -1,6 +1,9 @@
-python-telegram-bot[ext]
-python-binance
-requests
-apscheduler
-numpy
+python-telegram-bot
+google-generativeai
 python-dotenv
+python-binance
+numpy
+matplotlib
+cryptography
+filelock
+pandas

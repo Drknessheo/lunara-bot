@@ -1,6 +1,8 @@
 import logging
 from datetime import datetime, timezone
-from telegram import Update, Chat
+import asyncio
+import os
+from telegram import Update, Chat, InputFile
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
 import google.generativeai as genai
@@ -8,6 +10,7 @@ import google.generativeai as genai
 import config
 import db
 import trade
+from Simulation import resonance_engine
 
 # Enable logging
 logging.basicConfig(
@@ -115,14 +118,18 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 pnl_percent = ((current_price - buy_price) / buy_price) * 100
                 pnl_emoji = "📈" if pnl_percent >= 0 else "📉"
                 
-                # Calculate progress to Take Profit
+                # --- Indicator Calculations ---
+                rsi = trade.get_rsi(symbol)
+                upper_band, middle_band, lower_band, _ = trade.get_bollinger_bands(symbol)
+
+                # --- Progress Bar Logic ---
                 tp_price = trade_item['take_profit_price']
                 total_gain_needed = tp_price - buy_price
                 current_gain = current_price - buy_price
                 progress_str = ""
                 if total_gain_needed > 0 and current_gain > 0:
                     progress_percent = (current_gain / total_gain_needed) * 100
-                    progress_str = f" ({progress_percent:.0f}% there)"
+                    progress_str = f" ({min(progress_percent, 100):.0f}% there)"
 
                 message += (
                     f"\n   {pnl_emoji} P/L: `{pnl_percent:+.2f}%`"
@@ -131,6 +138,12 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     f"\n   ✅ Target: `${tp_price:,.8f}`{progress_str}"
                     f"\n   🛡️ Stop: `${trade_item['stop_loss_price']:,.8f}`"
                 )
+
+                if rsi is not None:
+                    message += f"\n   ⚖️ RSI: `{rsi:.2f}`"
+                if upper_band is not None:
+                    message += f"\n   📊 BBands: `${lower_band:,.8f}` - `${upper_band:,.8f}`"
+
             else:
                 message += "\n   _(Could not fetch current price)_"
 
@@ -152,10 +165,46 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text(message, parse_mode='Markdown')
 
 async def resonate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Static handler for the /resonate command."""
-    await update.message.reply_text(
-        "Listen to the market's hum. Patience is a virtue. The right moment will reveal itself."
-    )
+    """Runs Lunessa's quantum resonance simulation and sends the results."""
+    user_id = update.effective_user.id
+    symbol = None
+    if context.args:
+        symbol = context.args[0].upper()
+        await update.message.reply_text(f"Attuning my quantum senses to the vibrations of **{symbol}**... Please wait. 🔮", parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text("Attuning my quantum senses to the general market vibration... Please wait. 🔮")
+
+    metric_plot_path = None
+    clock_plot_path = None
+    try:
+        # Run the potentially long-running simulation in a separate thread
+        # to avoid blocking the bot's event loop.
+        # Pass the symbol to the simulation engine.
+        loop = asyncio.get_running_loop()
+        results = await loop.run_in_executor(
+            None, resonance_engine.run_resonance_simulation, user_id, symbol
+        )
+
+        narrative = results['narrative']
+        metric_plot_path = results['metric_plot']
+        clock_plot_path = results['clock_plot']
+
+        # Send the narrative text
+        await update.message.reply_text(narrative, parse_mode=ParseMode.MARKDOWN)
+
+        # Send the plots
+        await update.message.reply_photo(photo=open(metric_plot_path, 'rb'), caption="Soul Waveform Analysis")
+        await update.message.reply_photo(photo=open(clock_plot_path, 'rb'), caption="Clock Phase Distortions")
+
+    except Exception as e:
+        logger.error(f"Error running resonance simulation for user {user_id}: {e}", exc_info=True)
+        await update.message.reply_text("The cosmic energies are scrambled. I could not generate a resonance report at this time.")
+    finally:
+        # Clean up the generated plot files
+        if metric_plot_path and os.path.exists(metric_plot_path):
+            os.remove(metric_plot_path)
+        if clock_plot_path and os.path.exists(clock_plot_path):
+            os.remove(clock_plot_path)
 
 async def safety_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Static handler for the /safety command."""
@@ -673,7 +722,7 @@ def main() -> None:
     application.add_handler(CommandHandler("balance", balance_command))
     application.add_handler(CommandHandler("close", close_command))
     application.add_handler(CommandHandler("review", review_command))
-    application.add_handler(CommandHandler("resonate", resonate_command))
+    application.add_handler(CommandHandler("resonate", resonate_command)) # This now calls the simulation
     application.add_handler(CommandHandler("top_trades", top_trades_command))
     application.add_handler(CommandHandler("leaderboard", leaderboard_command))
     application.add_handler(CommandHandler("myprofile", myprofile_command))

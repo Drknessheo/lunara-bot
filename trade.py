@@ -6,6 +6,7 @@ from binance.client import Client
 from binance.exceptions import BinanceAPIException
 from telegram import Update
 from telegram.ext import ContextTypes
+import pandas as pd
 
 import config
 import db
@@ -95,6 +96,35 @@ def get_bollinger_bands(symbol, interval=Client.KLINE_INTERVAL_1HOUR, period=20,
     except Exception as e:
         logger.error(f"An unexpected error occurred getting Bollinger Bands for {symbol}: {e}")
         return None, None, None, None
+
+def get_macd(symbol, interval=Client.KLINE_INTERVAL_1HOUR, fast_period=12, slow_period=26, signal_period=9):
+    """Calculates the MACD for a given symbol."""
+    try:
+        # Fetch enough klines for the slow EMA + signal line
+        klines = client.get_historical_klines(symbol, interval, f"{slow_period + signal_period + 50} hours ago UTC")
+        if len(klines) < slow_period + signal_period:
+            return None, None, None
+
+        closes = pd.Series([float(k[4]) for k in klines])
+
+        # Calculate EMAs
+        ema_fast = closes.ewm(span=fast_period, adjust=False).mean()
+        ema_slow = closes.ewm(span=slow_period, adjust=False).mean()
+
+        # Calculate MACD line
+        macd_line = ema_fast - ema_slow
+
+        # Calculate Signal line
+        signal_line = macd_line.ewm(span=signal_period, adjust=False).mean()
+
+        # Calculate MACD Histogram
+        macd_histogram = macd_line - signal_line
+
+        # Return the most recent values
+        return macd_line.iloc[-1], signal_line.iloc[-1], macd_histogram.iloc[-1]
+    except Exception as e:
+        logger.error(f"An unexpected error occurred getting MACD for {symbol}: {e}")
+        return None, None, None
 
 def get_account_balance(user_id: int, asset="USDT"):
     """Fetches the free balance for a specific asset from the Binance spot account."""
