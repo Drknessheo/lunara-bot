@@ -1,52 +1,36 @@
-import logging
-from datetime import datetime, timezone
-import asyncio
 import os
-from telegram import Update, Chat, InputFile
-from telegram.constants import ParseMode
+from dotenv import load_dotenv
+from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.constants import ParseMode
 import google.generativeai as genai
-
-import config
-import db
-import trade
 from Simulation import resonance_engine
+import config
+import trade
 
-# Enable logging
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
+# Load environment variables from .env file
+load_dotenv()
+
+from handlers import *
+from jobs import *
+from decorators import require_tier
+from modules import db_access as db
+import logging
+from datetime import datetime, timezone, timedelta
+
 logger = logging.getLogger(__name__)
 
-# --- AI Configuration ---
-if config.GEMINI_API_KEY:
-    genai.configure(api_key=config.GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+import asyncio
+
+# --- Gemini AI Model Initialization ---\nmodel = None
+gemini_api_key = os.getenv("GEMINI_API_KEY")
+if gemini_api_key:
+    genai.configure(api_key=gemini_api_key)
+    model = genai.GenerativeModel('gemini-pro')
+    logger.info("Gemini AI model initialized successfully.")
 else:
-    model = None
-    logger.warning("GEMINI_API_KEY not found. The /ask command will be disabled.")
+    logger.warning("GEMINI_API_KEY not found in environment variables. AI features will be disabled.")
 
-# --- Command Handlers ---
-async def linkbinance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Provides instructions for linking Binance API keys."""
-    await update.message.reply_html(
-        "<b>How to Link Your Binance API Keys</b>\n\n"
-        "1. Go to your Binance account and create an API key.\n"
-        "2. Copy your API Key and Secret Key.\n"
-        "3. Send them to me in a private chat using:\n"
-        "<code>/setapi YOUR_API_KEY YOUR_SECRET_KEY</code>\n\n"
-        "Your keys are encrypted and stored securely."
-    )
-
-async def learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Provides educational resources and tips for new traders."""
-    await update.message.reply_html(
-        "<b>Welcome to the Crypto Academy!</b>\n\n"
-        "- <b>RSI:</b> The Relative Strength Index helps you spot overbought and oversold conditions.\n"
-        "- <b>Bollinger Bands:</b> These show price volatility and potential buy/sell zones.\n"
-        "- <b>Paper Trading:</b> Practice trading with virtual funds using /papertrade.\n\n"
-        "For more tips, ask me anything or use /help."
-    )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message when the /start command is issued."""
@@ -55,18 +39,55 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     user = update.effective_user
     await update.message.reply_html(
-        rf"🌑 <b>A new trader emerges from the shadows.</b> {user.mention_html()}, you have been summoned by <b>Lunessa Shai'ra Gork</b>, Sorceress of DeFi and guardian of RSI gates.\n\n"
-        "🧭 <i>Your journey begins now.</i>\n"
-        "- Quest 1: Link your API Key (Binance/OKX)\n"
-        "- Quest 2: Choose your weapon: RSI or Bollinger\n"
-        "- Quest 3: Survive 3 trades\n\n"
-        "Reply with: /linkbinance or /learn\n\n"
-        "To unlock the arcane powers, send your Binance API keys in a private message with: <code>/setapi YOUR_API_KEY YOUR_SECRET_KEY</code>\n\n"
+        rf"🌑 <b>A new trader emerges from the shadows.</b> {user.mention_html()}, you have been summoned by <b>Lunessa Shai'ra Gork</b>, Sorceress of DeFi and guardian of RSI gates.\\n\\n"
+        "🧭 <i>Your journey begins now.</i>\\n"
+        "- Quest 1: Link your API Key (Binance/OKX)\\n"
+        "- Quest 2: Choose your weapon: RSI or Bollinger\\n"
+        "- Quest 3: Survive 3 trades\\n\\n"
+        "Reply with: /linkbinance or /learn\\n\\n"
+        "To unlock the arcane powers, send your Binance API keys in a private message with: <code>/setapi YOUR_API_KEY YOUR_SECRET_KEY</code>\\n\\n"
         "Use /help to see all available commands."
     )
 
+# TODO: In /status, alert user about market position, best moves, or when the user might hit a target time. If a position is held too long, alert to sell near stop loss, and suggest trailing stop activation. The bot should help give the user better options.
+async def send_daily_status_summary(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sends a daily summary of open trades to active users."""
+    logger.info("Running daily status summary job...")
+    all_user_ids = db.get_all_user_ids()
+
+    # --- Send admin a user count summary ---
+    try:
+        admin_id = getattr(config, "ADMIN_USER_ID", None)
+        if admin_id:
+            user_count = len(all_user_ids)
+            await context.bot.send_message(chat_id=admin_id, text=f"👥 Total users: <b>{user_count}</b>", parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.warning(f"Failed to send user count to admin: {e}")
+
+    for user_id in all_user_ids:
+        open_trades = db.get_open_trades(user_id)
+        if not open_trades:
+            continue # Skip users with no open trades
+
+        # ...existing code...
+
 async def quest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler for the /crypto command. Calls the trade module."""
+    user_id = update.effective_user.id
+    user_tier = db.get_user_tier(user_id)
+    if user_tier != 'PREMIUM':
+        # Free users: Only show RSI
+        symbol = context.args[0].upper() if context.args else None
+        if not symbol:
+            await update.message.reply_text("Please specify a symbol. Usage: /quest SYMBOL", parse_mode='Markdown')
+            return
+        rsi = trade.get_rsi(symbol)
+        if rsi is None:
+            await update.message.reply_text(f"Could not fetch RSI for {symbol}.")
+            return
+        await update.message.reply_text(f"RSI for {symbol}: `{rsi:.2f}`\\nUpgrade to Premium for full analysis.", parse_mode='Markdown')
+        return
+    # Premium: Full analysis
     await trade.quest_command(update, context)
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -75,93 +96,68 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     open_trades = db.get_open_trades(user_id)
     watched_items = db.get_watched_items_by_user(user_id)
 
+    user_tier = db.get_user_tier(user_id)
+    
+
     if not open_trades and not watched_items:
         await update.message.reply_text("You have no open quests or watched symbols. Use /quest to find an opportunity.")
         return
 
     message = ""
+
+    # --- Get all prices from the job's cache ---
+    prices = {}
+    cached_prices_data = context.bot_data.get('all_prices', {})
+    if cached_prices_data:
+        cache_timestamp = cached_prices_data.get('timestamp')
+        # Cache is valid if it's less than 125 seconds old (job runs every 60s)
+        if cache_timestamp and (datetime.now(timezone.utc) - cache_timestamp).total_seconds() < 125:
+            prices = cached_prices_data.get('prices', {})
+            logger.info(f"Using cached prices for /status for user {user_id}.")
+        else:
+            logger.warning(f"Price cache for user {user_id} is stale. Displaying last known data.")
+
     if open_trades:
-        message += "📜 **Your Open Quests:**\n"
-
-        # --- Refactored Price Fetching Logic ---
-        prices = {}
-        symbols_to_fetch = {t['coin_symbol'] for t in open_trades}
-
-        # Check for cached prices from the monitor job
-        cached_prices_data = context.bot_data.get('all_prices', {})
-        if cached_prices_data:
-            cached_prices = cached_prices_data.get('prices', {})
-            cache_timestamp = cached_prices_data.get('timestamp')
-
-            # Cache is valid if it's less than 65 seconds old (job runs every 60s)
-            if cache_timestamp and (datetime.now(timezone.utc) - cache_timestamp).total_seconds() < 65:
-                logger.info(f"Using cached prices for /status for user {user_id}.")
-                for symbol in symbols_to_fetch:
-                    if symbol in cached_prices:
-                        prices[symbol] = cached_prices[symbol]
-
-        # Identify and fetch any prices that were not in the valid cache
-        symbols_to_fetch_now = {s for s in symbols_to_fetch if s not in prices}
-        if symbols_to_fetch_now:
-            logger.info(f"Cache miss for {len(symbols_to_fetch_now)} symbol(s). Fetching individually for /status for user {user_id}.")
-            for symbol in symbols_to_fetch_now:
-                prices[symbol] = trade.get_current_price(symbol) # Fallback to individual API call
-
+        message += "📜 **Your Open Quests:**\\n"
         for trade_item in open_trades:
             symbol = trade_item['coin_symbol']
             buy_price = trade_item['buy_price']
             current_price = prices.get(symbol)
+            trade_id = trade_item['id']
 
-            message += f"\n🔹 **{symbol}** (ID: {trade_item['id']})"
+            message += f"\\n🔹 **{symbol}** (ID: {trade_id})"
 
             if current_price:
                 pnl_percent = ((current_price - buy_price) / buy_price) * 100
                 pnl_emoji = "📈" if pnl_percent >= 0 else "📉"
-                
-                # --- Indicator Calculations ---
-                rsi = trade.get_rsi(symbol)
-                upper_band, middle_band, lower_band, _ = trade.get_bollinger_bands(symbol)
-
-                # --- Progress Bar Logic ---
-                tp_price = trade_item['take_profit_price']
-                total_gain_needed = tp_price - buy_price
-                current_gain = current_price - buy_price
-                progress_str = ""
-                if total_gain_needed > 0 and current_gain > 0:
-                    progress_percent = (current_gain / total_gain_needed) * 100
-                    progress_str = f" ({min(progress_percent, 100):.0f}% there)"
-
                 message += (
-                    f"\n   {pnl_emoji} P/L: `{pnl_percent:+.2f}%`"
-                    f"\n   Bought: `${buy_price:,.8f}`"
-                    f"\n   Current: `${current_price:,.8f}`"
-                    f"\n   ✅ Target: `${tp_price:,.8f}`{progress_str}"
-                    f"\n   🛡️ Stop: `${trade_item['stop_loss_price']:,.8f}`"
+                    f"\\n   {pnl_emoji} P/L: `{pnl_percent:+.2f}%`"
+                    f"\\n   Bought: `${buy_price:,.8f}`"
+                    f"\\n   Current: `${current_price:,.8f}`"
                 )
-
-                if rsi is not None:
-                    message += f"\n   ⚖️ RSI: `{rsi:.2f}`"
-                if upper_band is not None:
-                    message += f"\n   📊 BBands: `${lower_band:,.8f}` - `${upper_band:,.8f}`"
-
+                if user_tier == 'PREMIUM':
+                    tp_price = trade_item['take_profit_price']
+                    stop_loss = trade_item['stop_loss_price']
+                    message += (
+                        f"\\n   ✅ Target: `${tp_price:,.8f}`"
+                        f"\\n   🛡️ Stop: `${stop_loss:,.8f}`"
+                    )
             else:
-                message += "\n   _(Could not fetch current price)_"
+                message += "\\n   _(Price data is currently being updated)_"
 
-        message += "\n" # Add a newline for spacing before the watchlist
+        message += "\\n"  # Add a newline for spacing before the watchlist
 
     if watched_items:
-        message += "\n🔭 **Your Watched Symbols:**\n"
+        message += "\\n🔭 **Your Watched Symbols:**\\n"
         for item in watched_items:
             # Calculate time since added
             add_time = datetime.strptime(item['add_timestamp'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
             time_watching = datetime.now(timezone.utc) - add_time
             hours, remainder = divmod(time_watching.total_seconds(), 3600)
             minutes, _ = divmod(remainder, 60)
-            message += (
-                f"\n🔸 **{item['coin_symbol']}**"
-                f"\n   *Watching for {int(hours)}h {int(minutes)}m*"
-            )
+            message += f"\\n🔸 **{item['coin_symbol']}** (*Watching for {int(hours)}h {int(minutes)}m*)"
 
+    # The send_premium_message wrapper is overly complex; a direct reply is cleaner.
     await update.message.reply_text(message, parse_mode='Markdown')
 
 async def resonate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -232,7 +228,7 @@ async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         # context.args contains the words after the command, e.g., ['123']
         trade_id = int(context.args[0])
     except (IndexError, ValueError):
-        await update.message.reply_text("Please provide a valid trade ID.\nUsage: `/close <trade_id>`", parse_mode='Markdown')
+        await update.message.reply_text("Please provide a valid trade ID.\\nUsage: `/close <trade_id>`", parse_mode='Markdown')
         return
 
     trade_to_close = db.get_trade_by_id(trade_id=trade_id, user_id=user_id)
@@ -251,9 +247,232 @@ async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     success = db.close_trade(trade_id=trade_id, user_id=user_id, sell_price=current_price)
 
     if success:
-        await update.message.reply_text(f"✅ Quest (ID: {trade_id}) for {symbol} has been completed at a price of ${current_price:,.8f}!\n\nUse /review to see your performance.")
+        await update.message.reply_text(f"✅ Quest (ID: {trade_id}) for {symbol} has been completed at a price of ${current_price:,.8f}!\\n\\nUse /review to see your performance.")
     else:
         await update.message.reply_text("An unexpected error occurred while closing the trade.")
+
+async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Displays the user's current spot wallet balances on Binance."""
+    user_id = update.effective_user.id
+    mode, _ = db.get_user_trading_mode_and_balance(user_id)
+    is_admin = user_id == config.ADMIN_USER_ID
+
+    if mode != 'LIVE' and not is_admin:
+        await update.message.reply_text("This command is for LIVE mode only. Your paper wallet is managed separately via /balance.")
+        return
+
+    await update.message.reply_text("Retrieving your spot wallet balances from Binance... 🏦")
+
+    try:
+        # Admin/creator/father bypasses API key check
+        if is_admin:
+            balances = trade.get_all_spot_balances(config.ADMIN_USER_ID)
+        else:
+            balances = trade.get_all_spot_balances(user_id)
+        if balances is None:
+            if is_admin:
+                await update.message.reply_text("Admin wallet retrieval failed. Please check Binance connectivity.", parse_mode='Markdown')
+            else:
+                await update.message.reply_text("Could not retrieve balances. Please ensure your API keys are set correctly with `/setapi`.", parse_mode='Markdown')
+            return
+        if not balances:
+            await update.message.reply_text("Your spot wallet appears to be empty.")
+            return
+
+        # Fetch all prices at once for valuation
+        all_tickers = trade.client.get_all_tickers()
+        prices = {item['symbol']: float(item['price']) for item in all_tickers}
+
+        valued_assets = []
+        total_usdt_value = 0.0
+
+        for balance in balances:
+            asset = balance['asset']
+            total_balance = float(balance['free']) + float(balance['locked'])
+
+            if asset.upper() in ['USDT', 'BUSD', 'USDC', 'FDUSD', 'TUSD']:
+                usdt_value = total_balance
+            else:
+                pair = f"{asset}USDT"
+                price = prices.get(pair)
+                usdt_value = (total_balance * price) if price else 0
+
+            if usdt_value > 1.0:  # Only show assets worth more than $1
+                valued_assets.append({'asset': asset, 'balance': total_balance, 'usdt_value': usdt_value})
+                if asset.upper() not in ['USDT', 'BUSD', 'USDC', 'FDUSD', 'TUSD']:
+                    total_usdt_value += usdt_value
+
+        # Add USDT itself to the total value at the end
+        total_usdt_value += next((b['usdt_value'] for b in valued_assets if b['asset'] == 'USDT'), 0)
+
+        # Sort by USDT value, descending
+        valued_assets.sort(key=lambda x: x['usdt_value'], reverse=True)
+
+        message = "💎 **Your Spot Wallet Holdings:**\\n\\n"
+        for asset_info in valued_assets:
+            balance_str = f"{asset_info['balance']:,.8f}".rstrip('0').rstrip('.')
+            message += f"  - **{asset_info['asset']}**: `{balance_str}` (~${asset_info['usdt_value']:,.2f})\\n"
+
+        message += f"\\n*Estimated Total Value:* `${total_usdt_value:,.2f}` USDT"
+
+        await update.message.reply_text(message, parse_mode='Markdown')
+
+    except trade.TradeError as e:
+        await update.message.reply_text(f"⚠️ **Error!**\\n\\n*Reason:* `{e}`", parse_mode='Markdown')
+
+async def import_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Imports all significant holdings from Binance wallet as new quests."""
+    user_id = update.effective_user.id
+    mode, _ = db.get_user_trading_mode_and_balance(user_id)
+
+    if mode != 'LIVE':
+        await update.message.reply_text("Upgrade to Premium to use this feature.")
+        return
+
+    await update.message.reply_text("Scanning your Binance wallet to import all significant holdings as quests... 🔎 This may take a moment.")
+
+    try:
+        balances = trade.get_all_spot_balances(user_id)
+        if not balances:
+            await update.message.reply_text("Your spot wallet appears to be empty. Nothing to import.")
+            return
+
+        # Fetch all prices at once
+        all_tickers = trade.client.get_all_tickers()
+        prices = {item['symbol']: float(item['price']) for item in all_tickers}
+
+        imported_count = 0
+        skipped_count = 0
+        message_lines = []
+
+        for balance in balances:
+            asset = balance['asset']
+            total_balance = float(balance['free']) + float(balance['locked'])
+            symbol = f"{asset}USDT"
+
+            if asset.upper() in ['USDT', 'BUSD', 'USDC', 'FDUSD', 'TUSD']:
+                continue
+
+            price = prices.get(symbol)
+            if not price:
+                continue
+
+            usdt_value = total_balance * price
+            if usdt_value < 10.0:
+                continue
+
+            if db.is_trade_open(user_id, symbol):
+                skipped_count += 1
+                continue
+
+            settings = db.get_user_effective_settings(user_id)
+            stop_loss_price = price * (1 - settings['STOP_LOSS_PERCENTAGE'] / 100)
+            take_profit_price = price * (1 + settings['PROFIT_TARGET_PERCENTAGE'] / 100)
+
+            db.log_trade(
+                user_id=user_id, coin_symbol=symbol, buy_price=price,
+                stop_loss=stop_loss_price, take_profit=take_profit_price,
+                mode='LIVE', trade_size_usdt=usdt_value, quantity=total_balance
+            )
+            imported_count += 1
+            message_lines.append(f"  ✅ Imported **{symbol}** (~${usdt_value:,.2f})")
+
+        summary_message = "✨ **Import Complete!** ✨\\n\\n"
+        if message_lines:
+            summary_message += "\\n".join(message_lines) + "\\n\\n"
+        summary_message += f"*Summary:*\\n"
+        summary_message += f"- New Quests Started: `{imported_count}`\\n"
+        summary_message += f"- Already Tracked: `{skipped_count}`\\n\\n"
+        summary_message += "Use /status to see your newly managed quests."
+
+        await update.message.reply_text(summary_message, parse_mode='Markdown')
+
+    except trade.TradeError as e:
+        await update.message.reply_text(f"⚠️ **Error!**\\n\\n*Reason:* `{e}`", parse_mode='Markdown')
+
+async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Places a live buy order. Premium feature.
+    Usage: /buy <SYMBOL> <USDT_AMOUNT>
+    """
+    user_id = update.effective_user.id
+    mode, _ = db.get_user_trading_mode_and_balance(user_id)
+
+    is_admin = user_id == config.ADMIN_USER_ID
+    if mode != 'LIVE' and not is_admin:
+        await update.message.reply_text("Upgrade to Premium to use this feature.")
+        return
+
+    try:
+        symbol = context.args[0].upper()
+        usdt_amount = float(context.args[1])
+    except (IndexError, ValueError):
+        await update.message.reply_text("Please specify a symbol and amount.\\nUsage: `/buy PEPEUSDT 11`", parse_mode='Markdown')
+        return
+
+    if db.is_trade_open(user_id, symbol):
+        await update.message.reply_text(f"You already have an open quest for {symbol}. Use /status to see it.")
+        return
+
+    await update.message.reply_text(f"Preparing to embark on a **LIVE** quest for **{symbol}** with **${usdt_amount:.2f}**...", parse_mode='Markdown')
+
+    try:
+        # Admin/creator/father bypasses API key check
+        if is_admin:
+            live_balance = float('inf')
+        else:
+            live_balance = trade.get_account_balance(user_id, 'USDT')
+        if not is_admin and (live_balance is None or live_balance < usdt_amount):
+            await update.message.reply_text(f"Your live USDT balance (`${live_balance:.2f}`) is insufficient for this quest.")
+            return
+
+        # Place the live order
+        if is_admin:
+            order, entry_price, quantity = trade.place_buy_order(config.ADMIN_USER_ID, symbol, usdt_amount)
+        else:
+            order, entry_price, quantity = trade.place_buy_order(user_id, symbol, usdt_amount)
+
+        # Log the successful trade
+        settings = db.get_user_effective_settings(user_id)
+        stop_loss_price = entry_price * (1 - settings['STOP_LOSS_PERCENTAGE'] / 100)
+        take_profit_price = entry_price * (1 + settings['PROFIT_TARGET_PERCENTAGE'] / 100)
+        db.log_trade(user_id=user_id, coin_symbol=symbol, buy_price=entry_price,
+                     stop_loss=stop_loss_price, take_profit=take_profit_price,
+                     mode='LIVE', trade_size_usdt=usdt_amount, quantity=quantity)
+
+        await update.message.reply_text(f"🚀 **Live Quest Started!**\\n\\nSuccessfully bought **{quantity:,.4f} {symbol}** at `${entry_price:,.8f}`.\\n\\nI will now monitor this quest for you. Use /status to see its progress.", parse_mode='Markdown')
+
+    except trade.TradeError as e:
+        await update.message.reply_text(f"⚠️ **Quest Failed!**\\n\\n*Reason:* `{e}`", parse_mode='Markdown')
+
+async def checked_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Shows which symbols the AI has checked recently."""
+    user_id = update.effective_user.id
+
+    if user_id != config.ADMIN_USER_ID:
+        await update.message.reply_text("This is an admin-only command.")
+        return
+
+    checked_symbols_log = context.bot_data.get('checked_symbols', [])
+    if not checked_symbols_log:
+        await update.message.reply_text("The AI has not checked any symbols yet.")
+        return
+
+    one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+
+    # Filter for the last hour and get unique symbols
+    recent_checks = sorted(list({symbol for ts, symbol in checked_symbols_log if ts > one_hour_ago}))
+
+    # Cleanup old entries from the log to prevent it from growing indefinitely
+    two_hours_ago = datetime.now(timezone.utc) - timedelta(hours=2)
+    context.bot_data['checked_symbols'] = [(ts, symbol) for ts, symbol in checked_symbols_log if ts > two_hours_ago]
+
+    if not recent_checks:
+        await update.message.reply_text("The AI has not checked any symbols in the last hour.")
+        return
+
+    message = "📈 **AI Oracle's Recent Scans (Last Hour):**\\n\\n" + ", ".join(f"`{s}`" for s in recent_checks)
+    await update.message.reply_text(message, parse_mode='Markdown')
 
 async def review_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Reviews the user's completed trade performance."""
@@ -295,22 +514,22 @@ async def review_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     avg_pnl_percent = total_profit_percent / total_trades if total_trades > 0 else 0
 
     message = (
-        f"🌟 **Lunessa's Performance Review** 🌟\n\n"
-        f"**Completed Quests:** {total_trades}\n"
-        f"**Victories (Wins):** {wins}\n"
-        f"**Setbacks (Losses):** {losses}\n"
-        f"**Win Rate:** {win_rate:.2f}%\n\n"
-        f"**Average P/L:** `{avg_pnl_percent:,.2f}%`\n"
+        f"🌟 **Lunessa's Performance Review** 🌟\\n\\n"
+        f"**Completed Quests:** {total_trades}\\n"
+        f"**Victories (Wins):** {wins}\\n"
+        f"**Setbacks (Losses):** {losses}\\n"
+        f"**Win Rate:** {win_rate:.2f}%\\n\\n"
+        f"**Average P/L:** `{avg_pnl_percent:,.2f}%`\\n"
     )
 
     if best_trade and worst_trade:
         message += (
-            f"\n**Top Performers:**\n"
-            f"🚀 **Best Quest:** {best_trade['coin_symbol']} (`{best_pnl:+.2f}%`)\n"
-            f"💔 **Worst Quest:** {worst_trade['coin_symbol']} (`{worst_pnl:+.2f}%`)\n"
+            f"\\n**Top Performers:**\\n"
+            f"🚀 **Best Quest:** {best_trade['coin_symbol']} (`{best_pnl:+.2f}%`)\\n"
+            f"💔 **Worst Quest:** {worst_trade['coin_symbol']} (`{worst_pnl:+.2f}%`)\\n"
         )
 
-    message += "\nKeep honing your skills, seeker. The market's rhythm is complex."
+    message += "\\nKeep honing your skills, seeker. The market's rhythm is complex."
     await update.message.reply_text(message, parse_mode='Markdown')
 
 async def top_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -322,15 +541,35 @@ async def top_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("You have no completed profitable quests to rank. Close a winning trade to enter the Hall of Fame!", parse_mode='Markdown')
         return
 
-    message = "🏆 **Your Hall of Fame** 🏆\n\n_Here are your most legendary victories:_\n\n"
+    message = "🏆 **Your Hall of Fame** 🏆\\n\\n_Here are your most legendary victories:_\\n\\n"
     rank_emojis = ["🥇", "🥈", "🥉"]
 
     for i, trade in enumerate(top_trades):
         emoji = rank_emojis[i] if i < len(rank_emojis) else "🔹"
-        message += f"{emoji} **{trade['coin_symbol']}**: `{trade['pnl_percent']:+.2f}%`\n"
+        message += f"{emoji} **{trade['coin_symbol']}**: `{trade['pnl_percent']:+.2f}%`\\n"
 
-    message += "\nMay your future quests be even more glorious!"
+    message += "\\nMay your future quests be even more glorious!"
     await update.message.reply_text(message, parse_mode='Markdown')
+
+async def referral_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Displays the bot owner's referral link and information."""
+    if not config.ADMIN_REFERRAL_CODE:
+        await update.message.reply_text("The referral program is not configured for this bot.")
+        return
+
+    referral_link = f"https://www.binance.com/en/activity/referral-entry/CPA?ref={config.ADMIN_REFERRAL_CODE}"
+
+    message = (
+        f"🤝 **Invite Friends, Earn Together!** 🤝\\n\\n"
+        f"Refer friends to buy crypto on Binance, and we both get rewarded!\\n\\n"
+        f"**The Deal:**\\n"
+        f"When your friend signs up using the link below and buys over $50 worth of crypto, you both receive a **$100 trading fee rebate voucher**.\\n\\n"
+        f"**Your Tools to Share:**\\n\\n"
+        f"🔗 **Referral Link:**\\n`{referral_link}`\\n\\n"
+        f"🏷️ **Referral Code:**\\n`{config.ADMIN_REFERRAL_CODE}`\\n\\n"
+        f"Share the link or code with your friends to start earning. Thank you for supporting the Lunessa project!"
+    )
+    await update.message.reply_text(message, parse_mode='Markdown', disable_web_page_preview=True)
 
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Displays the global leaderboard of top trades."""
@@ -340,7 +579,7 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("The Hall of Legends is still empty. No legendary quests have been completed yet!", parse_mode='Markdown')
         return
 
-    message = "🏆 **Hall of Legends: Global Top Quests** 🏆\n\n_These are the most glorious victories across the realm:_\n\n"
+    message = "🏆 **Hall of Legends: Global Top Quests** 🏆\\n\\n_These are the most glorious victories across the realm:_\\n\\n"
     rank_emojis = ["🥇", "🥈", "🥉"]
 
     for i, trade in enumerate(top_trades):
@@ -353,9 +592,9 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception as e:
             logger.warning(f"Could not fetch user name for {user_id} for leaderboard: {e}")
 
-        message += f"{emoji} **{trade['coin_symbol']}**: `{trade['pnl_percent']:+.2f}%` (by {user_name})\n"
+        message += f"{emoji} **{trade['coin_symbol']}**: `{trade['pnl_percent']:+.2f}%` (by {user_name})\\n"
 
-    message += "\nWill your name be etched into legend?"
+    message += "\\nWill your name be etched into legend?"
     await update.message.reply_text(message, parse_mode='Markdown')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -368,6 +607,7 @@ Here are the commands to guide your journey:
 <b>/start</b> - Begin your journey
 <b>/setapi</b> <code>KEY SECRET</code> - Link your Binance keys (in private chat)
 <b>/linkbinance</b> - Instructions for creating API keys
+<b>/wallet</b> - View your full Binance Spot Wallet
 <b>/myprofile</b> - View your profile and settings
 <b>/settings</b> - [Premium] Customize your trading parameters
 <b>/subscribe</b> - See premium benefits and how to upgrade
@@ -383,6 +623,8 @@ Here are the commands to guide your journey:
 <b>--- Performance & Community ---</b>
 <b>/review</b> - See your personal performance stats
 <b>/top_trades</b> - View your 3 best trades
+<b>/referral</b> - Get your referral link to invite friends
+<b>/autotrade</b> - [Admin] Enable or disable automatic trading. <i>When enabled, the bot will scan for strong buy signals and execute trades for you. You will be notified of all actions. Use <code>/autotrade on</code> or <code>/autotrade off</code> to control.</i>
 <b>/leaderboard</b> - See the global top 3 trades
 
 <b>--- General ---</b>
@@ -391,7 +633,8 @@ Here are the commands to guide your journey:
 <b>/pay</b> - See how to support Lunessa's development
 <b>/safety</b> - Read important trading advice
 <b>/resonate</b> - A word of wisdom from Lunessa
-<b>/help</b> - Show this help message"""
+<b>/help</b> - Show this help message
+"""
     await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
 
 async def myprofile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -402,24 +645,24 @@ async def myprofile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     trading_mode, paper_balance = db.get_user_trading_mode_and_balance(user_id)
 
     message = (
-        f"👤 **Your Profile** 👤\n\n"
-        f"**User ID:** `{user_id}`\n"
-        f"**Trading Mode:** {trading_mode}\n"
-        f"**Subscription Tier:** {user_tier}\n\n"
+        f"👤 **Your Profile** 👤\\n\\n"
+        f"**User ID:** `{user_id}`\\n"
+        f"**Trading Mode:** {trading_mode}\\n"
+        f"**Subscription Tier:** {user_tier}\\n\\n"
     )
 
     if user_tier == 'PREMIUM':
         message += (
-            "**Your Effective Trading Parameters:**\n"
-            f"- `rsi_buy`: {settings['RSI_BUY_THRESHOLD']}\n"
-            f"- `rsi_sell`: {settings['RSI_SELL_THRESHOLD']}\n"
-            f"- `stop_loss`: {settings['STOP_LOSS_PERCENTAGE']}%\n"
-            f"- `trailing_activation`: {settings['TRAILING_PROFIT_ACTIVATION_PERCENT']}%\n"
-            f"- `trailing_drop`: {settings['TRAILING_STOP_DROP_PERCENT']}%\n\n"
+            "**Your Effective Trading Parameters:**\\n"
+            f"- `rsi_buy`: {settings['RSI_BUY_THRESHOLD']}\\n"
+            f"- `rsi_sell`: {settings['RSI_SELL_THRESHOLD']}\\n"
+            f"- `stop_loss`: {settings['STOP_LOSS_PERCENTAGE']}%\\n"
+            f"- `trailing_activation`: {settings['TRAILING_PROFIT_ACTIVATION_PERCENT']}%\\n"
+            f"- `trailing_drop`: {settings['TRAILING_STOP_DROP_PERCENT']}%\\n\\n"
             "You can change these with the `/settings` command."
         )
         message += (
-            f"**Paper Balance:** `${paper_balance:,.2f}`\n"
+            f"**Paper Balance:** `${paper_balance:,.2f}`\\n"
         )
     else:
         message += "Upgrade to Premium with `/subscribe` to unlock custom settings and advanced features!"
@@ -432,22 +675,22 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     user_tier = db.get_user_tier(user_id)
 
     if user_tier != 'PREMIUM':
-        await update.message.reply_text("Custom settings are a Premium feature. Use /subscribe to upgrade.")
+        await update.message.reply_text("Upgrade to Premium to use this feature.")
         return
 
     # If no args, show current settings and usage
     if not context.args:
         settings = db.get_user_effective_settings(user_id)
         message = (
-            "⚙️ **Your Custom Settings** ⚙️\n\n"
-            "Here are your current effective trading parameters. You can override the defaults.\n\n"
-            f"- `rsi_buy`: {settings['RSI_BUY_THRESHOLD']}\n"
-            f"- `rsi_sell`: {settings['RSI_SELL_THRESHOLD']}\n"
-            f"- `stop_loss`: {settings['STOP_LOSS_PERCENTAGE']}%\n"
-            f"- `trailing_activation`: {settings['TRAILING_PROFIT_ACTIVATION_PERCENT']}%\n"
-            f"- `trailing_drop`: {settings['TRAILING_STOP_DROP_PERCENT']}%\n\n"
-            "**To change a setting:**\n`/settings <name> <value>`\n*Example: `/settings stop_loss 8.5`*\n\n"
-            "**To reset a setting to default:**\n`/settings <name> reset`"
+            "⚙️ **Your Custom Settings** ⚙️\\n\\n"
+            "Here are your current effective trading parameters. You can override the defaults.\\n\\n"
+            f"- `rsi_buy`: {settings['RSI_BUY_THRESHOLD']}\\n"
+            f"- `rsi_sell`: {settings['RSI_SELL_THRESHOLD']}\\n"
+            f"- `stop_loss`: {settings['STOP_LOSS_PERCENTAGE']}%\\n"
+            f"- `trailing_activation`: {settings['TRAILING_PROFIT_ACTIVATION_PERCENT']}%\\n"
+            f"- `trailing_drop`: {settings['TRAILING_STOP_DROP_PERCENT']}%\\n\\n"
+            "**To change a setting:**\\n`/settings <name> <value>`\\n*Example: `/settings stop_loss 8.5`*\\n\\n"
+            "**To reset a setting to default:**\\n`/settings <name> reset`"
         )
         await update.message.reply_text(message, parse_mode='Markdown')
         return
@@ -475,235 +718,137 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     except ValueError:
         await update.message.reply_text(f"Invalid value '{value_str}'. Please provide a number (e.g., 8.5) or 'reset'.")
 
-async def pay_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Shows donation and premium access information."""
-    message = (
-        f"🌟 **Support Lunessa's Journey** 🌟\n\n"
-        f"Your support helps keep the signals sharp and the quests engaging. Thank you for considering a donation!\n\n"
-        f"**Local Donations (Bangladesh):**\n"
-        f"- **bKash:** `01717948095`\n"
-        f"- **Rocket:** `01717948095`\n\n"
-        f"For premium features and quests, stay tuned!"
-    )
-    await update.message.reply_text(message, parse_mode='Markdown')
-
-async def set_api_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Securely sets the user's Binance API keys."""
+async def autotrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command to control the AI autotrading feature."""
     user_id = update.effective_user.id
-
-    if update.message.chat.type != Chat.PRIVATE:
-        await update.message.reply_text("For your security, please send this command in a private chat with me.")
-        return
-
-    try:
-        api_key = context.args[0]
-        secret_key = context.args[1]
-    except (IndexError, ValueError):
-        await update.message.reply_text(
-            "Please provide both API Key and Secret Key.\n"
-            "Usage (in a private chat):\n`/setapi <your_api_key> <your_secret_key>`",
-            parse_mode='Markdown'
-        )
-        return
-
-    db.store_user_api_keys(user_id, api_key, secret_key)
-
-    # For security, delete the message containing the keys
-    try:
-        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=update.message.message_id)
-        await update.message.reply_text("✅ Your API keys have been securely stored and your message has been deleted. You can now use commands like /balance and /import.")
-    except Exception as e:
-        logger.error(f"Could not delete API key message for user {user_id}: {e}")
-        await update.message.reply_text("✅ Your API keys have been securely stored. Please delete your message containing the keys manually.")
-
-async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays subscription information."""
-    user_id = update.effective_user.id
-    user_tier = db.get_user_tier(user_id)
-
-    message = (
-        f"🌟 **Subscription Status** 🌟\n\n"
-        f"You are currently on the **{user_tier}** tier.\n\n"
-        f"To upgrade to **Premium** and unlock advanced features like Bollinger Band intelligence and dynamic take-profit, please make a payment to the address below.\n\n"
-        f"**Payment Method:**\n"
-        f"- **Network:** Solana (SOL)\n"
-        f"- **Address:** `0xD96E942fDb4A0e7059Ae4548b5f410aA6E4F2dBe`\n\n"
-        f"**After Payment:**\n"
-        f"Once you have sent the payment, copy the **Transaction ID** and use the following command to request activation:\n"
-        f"`/verifypayment <your_transaction_id>`"
-    )
-    await update.message.reply_text(message, parse_mode='Markdown')
-
-async def activate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin command to activate a user's premium subscription."""
-    admin_id = update.effective_user.id
-
-    if admin_id != config.ADMIN_USER_ID:
-        await update.message.reply_text("You are not authorized to use this command.")
-        return
-
-    try:
-        target_user_id = int(context.args[0])
-        tier = context.args[1].upper()
-        if tier not in config.SUBSCRIPTION_TIERS:
-            await update.message.reply_text(f"Invalid tier '{tier}'. Valid tiers are: {list(config.SUBSCRIPTION_TIERS.keys())}")
-            return
-    except (IndexError, ValueError):
-        await update.message.reply_text(
-            "Usage: `/activate <user_id> <TIER>`\n"
-            "Example: `/activate 123456789 PREMIUM`",
-            parse_mode='Markdown'
-        )
-        return
-
-    db.update_user_tier(target_user_id, tier)
-    await update.message.reply_text(f"Successfully updated user {target_user_id} to the {tier} tier.")
-
-    # Notify the user
-    try:
-        await context.bot.send_message(chat_id=target_user_id, text=f"🎉 Congratulations! Your account has been upgraded to the **{tier}** tier. Enjoy your new features!", parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Failed to send activation notification to user {target_user_id}: {e}")
-        await update.message.reply_text(f"Could not notify user {target_user_id} of the upgrade.")
-
-async def verifypayment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Allows a user to submit a transaction ID for verification."""
-    user = update.effective_user
-    user_id = user.id
-
-    try:
-        tx_id = context.args[0]
-    except IndexError:
-        await update.message.reply_text("Please provide your transaction ID.\nUsage: `/verifypayment <transaction_id>`", parse_mode='Markdown')
-        return
-
-    if len(tx_id) < 60: # Basic validation for a Solana TX ID
-        await update.message.reply_text("That does not look like a valid transaction ID. Please double-check and try again.")
-        return
-
-    # Send a confirmation to the user
-    await update.message.reply_text("✅ Thank you! Your payment verification request has been sent to the admin. Please allow some time for activation.")
-
-    # Prepare the verification message for the admin
-    verification_message = (
-        f"🔔 **New Premium Activation Request** 🔔\n\n"
-        f"**User:** {user.mention_html()} (ID: `{user_id}`)\n"
-        f"**Transaction ID:** `{tx_id}`\n\n"
-        f"**Actions:**\n"
-        f"1. **Verify on Solscan:** Click here to view transaction\n"
-        f"2. **Activate Premium:** `/activate {user_id} PREMIUM`"
-    )
-    await context.bot.send_message(chat_id=config.ADMIN_USER_ID, text=verification_message, parse_mode='HTML')
-
-async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin command to send a message to all users."""
-    admin_id = update.effective_user.id
-
-    if admin_id != config.ADMIN_USER_ID:
-        await update.message.reply_text("You are not authorized to use this command.")
+    if user_id != config.ADMIN_USER_ID:
+        await update.message.reply_text("This is an admin-only command.")
         return
 
     if not context.args:
-        await update.message.reply_text("Please provide a message to broadcast.\nUsage: `/broadcast <your message>`", parse_mode='Markdown')
-        return
-
-    message_to_send = " ".join(context.args)
-    all_user_ids = db.get_all_user_ids()
-
-    if not all_user_ids:
-        await update.message.reply_text("No users found in the database to broadcast to.")
-        return
-
-    await update.message.reply_text(f"Starting broadcast to {len(all_user_ids)} users... This may take a moment.")
-
-    success_count = 0
-    fail_count = 0
-    broadcast_header = "📢 **A Message from Lunessa** 📢\n\n"
-    full_message = broadcast_header + message_to_send
-
-    for user_id in all_user_ids:
-        try:
-            # Use Markdown for better formatting in the broadcast message
-            await context.bot.send_message(chat_id=user_id, text=full_message, parse_mode='Markdown')
-            success_count += 1
-        except Exception as e:
-            logger.warning(f"Failed to send broadcast to user {user_id}: {e}")
-            fail_count += 1
-
-    await update.message.reply_text(f"✅ Broadcast complete!\n\nSuccessfully sent to: {success_count} users\nFailed to send to: {fail_count} users")
-
-async def papertrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles paper trading mode and balance."""
-    user_id = update.effective_user.id
-    args = context.args
-
-    if not args:
-        mode, balance = db.get_user_trading_mode_and_balance(user_id)
-        message = (
-            f"**Paper Trading Mode**\n\n"
-            f"You are currently in **{mode}** mode.\n"
-            f"Your paper balance is: **${balance:,.2f} USDT**\n\n"
-            "**Commands:**\n"
-            "- `/papertrade on` - Enable paper trading.\n"
-            "- `/papertrade off` - Switch to live trading (requires API keys).\n"
-            "- `/papertrade reset` - Reset your paper balance and close all paper trades."
-        )
-        await update.message.reply_text(message, parse_mode='Markdown')
-        return
-
-    sub_command = args[0].lower()
-
-    if sub_command == 'on':
-        db.set_user_trading_mode(user_id, 'PAPER')
-        await update.message.reply_text("✅ Paper trading mode **enabled**. All new quests will be simulated.")
-    elif sub_command == 'off':
-        # Admin doesn't need keys, others do.
-        if user_id != config.ADMIN_USER_ID:
-            api_key, _ = db.get_user_api_keys(user_id)
-            if not api_key:
-                await update.message.reply_text("You must set your API keys with `/setapi` before switching to live mode.")
-                return
-        db.set_user_trading_mode(user_id, 'LIVE')
-        await update.message.reply_text("✅ Live trading mode **enabled**. Use with caution.")
-    elif sub_command == 'reset':
-        db.reset_paper_account(user_id)
+        status = "ENABLED" if db.get_autotrade_status(user_id) else "DISABLED"
+        coins = getattr(config, "AI_MONITOR_COINS", [])
+        coins_str = ", ".join(coins) if coins else "None"
         await update.message.reply_text(
-            f"✅ Your paper trading account has been reset.\n"
-            f"Your new balance is **${config.PAPER_STARTING_BALANCE:,.2f} USDT**."
+            f"🤖 **AI Autotrade Status:** `{status}`\\n\\n"
+            f"<b>Monitored Coins:</b> {coins_str}\\n"
+            "<b>What is Autotrade?</b>\\n"
+            "When enabled, the bot will automatically scan for strong buy signals and execute trades for you. You will be notified of all actions.\\n"
+            "Use <code>/autotrade on</code> to enable, or <code>/autotrade off</code> to disable.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    sub_command = context.args[0].lower()
+    if sub_command == 'on':
+        db.set_autotrade_status(user_id, True)
+        await update.message.reply_text(
+            "🤖 <b>AI Autotrade has been ENABLED.</b>\\n\\n"
+            "The bot will now scan for strong buy signals and execute trades for you automatically. You will receive notifications for every action taken.\\n\\n"
+            "To disable, use <code>/autotrade off</code>.",
+            parse_mode=ParseMode.HTML
+        )
+    elif sub_command == 'off':
+        db.set_autotrade_status(user_id, False)
+        await update.message.reply_text(
+            "🤖 <b>AI Autotrade has been DISABLED.</b>\\n\\n"
+            "The bot will no longer execute trades automatically. You are now in manual mode.\\n\\n"
+            "To enable again, use <code>/autotrade on</code>.",
+            parse_mode=ParseMode.HTML
         )
     else:
+        await update.message.reply_text("Invalid command. Use <code>/autotrade on</code> or <code>/autotrade off</code>.", parse_mode=ParseMode.HTML)
+
+async def addcoins_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Premium command to add or reset coins for AI monitoring."""
+    user_id = update.effective_user.id
+    if user_id != config.ADMIN_USER_ID and db.get_user_tier(user_id) != 'PREMIUM':
+        await update.message.reply_text("Upgrade to Premium to use this feature.")
+        return
+
+    args = context.args
+    if not args:
+        coins = getattr(config, "AI_MONITOR_COINS", [])
+        coins_str = ", ".join(coins) if coins else "None"
         await update.message.reply_text(
-            f"Unknown command. Use `/papertrade` to see available options."
+            f"Current monitored coins: {coins_str}\\nUsage: /addcoins OMbtc, ARBUSDT, ... or /addcoins reset",
+            parse_mode='Markdown'
         )
+        return
 
+    if args[0].lower() == "reset":
+        config.AI_MONITOR_COINS = [
+            "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "ARBUSDT", "PEPEUSDT", "DOGEUSDT", "SHIBUSDT"
+        ]
+        await update.message.reply_text("AI_MONITOR_COINS has been reset to default.")
+        return
+
+    # Add coins (comma or space separated)
+    coins_to_add = []
+    for arg in args:
+        coins_to_add += [c.strip().upper() for c in arg.replace(",", " ").split() if c.strip()]
+    # Remove duplicates, add to config
+    current_coins = set(getattr(config, "AI_MONITOR_COINS", []))
+    new_coins = current_coins.union(coins_to_add)
+    config.AI_MONITOR_COINS = list(new_coins)
+    coins_str = ", ".join(config.AI_MONITOR_COINS)
+    await update.message.reply_text(f"Updated monitored coins: {coins_str}")
+
+async def set_api_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("API key linking is not available for free users. Upgrade to Premium.")
+
+async def activate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("Activation is a Premium feature.")
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("Broadcast is a Premium feature.")
+
+async def papertrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("Paper trading is a Premium feature.")
+
+async def verifypayment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("Payment verification is a Premium feature.")
+
+async def pay_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("Payment is a Premium feature.")
+
+async def usercount_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("User count is a Premium feature.")
+
+# --- Restore previous /ask command logic ---
 async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Answers user questions using the Gemini AI model."""
+    """Handles the /ask command using Gemini AI for Premium users."""
+    user_id = update.effective_user.id
+    user_tier = db.get_user_tier(user_id)
+    if user_tier != 'PREMIUM':
+        await update.message.reply_text("Upgrade to Premium to use the AI Oracle.")
+        return
     if not model:
-        await update.message.reply_text("The AI Oracle is currently unavailable. Please check the bot's configuration.")
+        await update.message.reply_text("Gemini AI is not configured. This feature is currently unavailable.")
         return
-
-    question = " ".join(context.args)
+    question = " ".join(context.args) if context.args else None
     if not question:
-        await update.message.reply_text("What knowledge do you seek? Usage: `/ask <your question about trading>`", parse_mode='Markdown')
+        await update.message.reply_text("Please provide a question. Usage: /ask Should I buy ARBUSDT now?")
         return
-
-    await update.message.reply_text("Lunessa is consulting the cosmic AI oracle... 🧠✨")
-
+    await update.message.reply_text("Consulting the AI Oracle... Please wait.")
     try:
-        user_name = update.effective_user.first_name
-        # Add some context to the prompt to guide the AI
-        prompt = (
-            "You are a helpful crypto trading assistant named Lunessa. "
-            f"A user named {user_name} has asked the following question. Greet them by name. Provide a clear, concise, and helpful answer. "
-            "Do not give financial advice. Frame your answer from the perspective of a wise trading sorceress.\n\n"
-            f"Question: {question}"
-        )
-        # The google-generativeai library's generate_content_async is awaitable
-        response = await model.generate_content_async(prompt)
-        await update.message.reply_text(response.text, parse_mode='Markdown')
+        response = await asyncio.to_thread(model.generate_content, question)
+        answer = response.text if hasattr(response, 'text') else str(response)
+        await update.message.reply_text(f"🔮 AI Oracle says:\\n\\n{answer}")
     except Exception as e:
-        logger.error(f"Error calling Gemini API: {e}")
-        await update.message.reply_text("The cosmic energies are scrambled. I could not get an answer at this time.")
+        logger.error(f"Gemini AI error: {e}")
+        await update.message.reply_text("The AI Oracle could not answer at this time.")
+
+
+# --- Placeholder Command Handlers ---
+async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("This is a placeholder for the subscribe command.")
+
+async def linkbinance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("This is a placeholder for the linkbinance command.")
+
+async def learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("This is a placeholder for the learn command.")
 
 
 def main() -> None:
@@ -716,6 +861,7 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("about", trade.about_command))
     application.add_handler(CommandHandler("quest", quest_command)) # This now handles the main trading logic
     application.add_handler(CommandHandler("import", import_command))
     application.add_handler(CommandHandler("status", status_command))
@@ -724,6 +870,7 @@ def main() -> None:
     application.add_handler(CommandHandler("review", review_command))
     application.add_handler(CommandHandler("resonate", resonate_command)) # This now calls the simulation
     application.add_handler(CommandHandler("top_trades", top_trades_command))
+    application.add_handler(CommandHandler("referral", referral_command))
     application.add_handler(CommandHandler("leaderboard", leaderboard_command))
     application.add_handler(CommandHandler("myprofile", myprofile_command))
     application.add_handler(CommandHandler("settings", settings_command))
@@ -739,15 +886,23 @@ def main() -> None:
     application.add_handler(CommandHandler("linkbinance", linkbinance_command))
     application.add_handler(CommandHandler("learn", learn_command))
     application.add_handler(CommandHandler("ask", ask_command))
+    application.add_handler(CommandHandler("usercount", trade.usercount_command))
+    application.add_handler(CommandHandler("autotrade", autotrade_command))
+    application.add_handler(CommandHandler("addcoins", addcoins_command))
+    application.add_handler(CommandHandler("buy", buy_command))
+    application.add_handler(CommandHandler("import_all", import_all_command))
+    application.add_handler(CommandHandler("wallet", wallet_command))
+    application.add_handler(CommandHandler("checked", checked_command))
 
     # --- Set up background jobs ---
     job_queue = application.job_queue
     # Schedule the auto-scan job to run every 10 minutes (600 seconds).
-    # The 'first=10' parameter makes it run for the first time 10 seconds after startup.
-    job_queue.run_repeating(trade.monitor_market_and_trades, interval=60, first=10) # Check every minute for responsiveness
+    job_queue.run_repeating(trade.scheduled_monitoring_job, interval=60, first=10) # This job now handles all monitoring
+    # Schedule the daily summary job to run at 8:00 AM UTC
+    job_queue.run_daily(send_daily_status_summary, time=datetime(1, 1, 1, 8, 0, 0, tzinfo=timezone.utc).time())
 
-    logger.info("Starting bot with auto-scan enabled...")
+    logger.info("Starting bot with market monitor and AI trade monitor jobs scheduled...")
     application.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

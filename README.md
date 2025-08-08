@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 Great! Here's a **professional `README.md`** for your `lunara-bot` — designed for clarity, community use, and potential future monetization or scaling.
 
 ---
@@ -131,3 +132,48 @@ Join us in this fusion of trading and metaphysical clarity.
 
 Let me know what you want to do next — and I’ll generate the code or commands right away.
 ```
+=======
+# Lunessa Shi’ra Gork – Automated Crypto Trading Bot
+
+Lunessa Shi’ra Gork is an intelligent, rule-driven trading bot for Binance Spot markets. It combines AI signals, robust risk controls, and real-time Telegram alerts to help you trade smarter and safer.
+
+## Features
+- **Rule-driven signals:** Monitors top coins and executes trades based on technical indicators (RSI, MACD, Bollinger Bands).
+- **Risk controls:** Stop-loss, trailing stop, and per-trade allocation to protect your capital.
+- **LIVE and TEST modes:** Trade with real funds or safely simulate.
+- **Telegram integration:** Get instant alerts, summaries, and control your bot remotely.
+- **Easy setup:** Just add your Binance API keys and Telegram bot token.
+
+## Supported Coins
+BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, ADAUSDT, XRPUSDT, DOGEUSDT, MATICUSDT, DOTUSDT, AVAXUSDT, LINKUSDT, ARBUSDT, OPUSDT, LTCUSDT, TRXUSDT, SHIBUSDT, PEPEUSDT, UNIUSDT, SUIUSDT, INJUSDT, RNDRUSDT, PENGUUSDT, CTKUSDT, OMBTC, ENAUSDT, HYPERUSDT, BABYUSDT, KAITOUSDT
+
+## Quick Start
+1. Clone the repo and install requirements:
+   ```
+   git clone https://github.com/Drknessheo/lunara-bot.git
+   cd lunara-bot
+   pip install -r requirements.txt
+   ```
+2. Add your Binance API keys and Telegram bot token to `.env` or `config.py`.
+3. Run the bot:
+   ```
+   python main.py
+   ```
+
+## Main Commands
+- `/help` – Show usage and features
+- `/status` – Show wallet and trade status
+- `/import` – Import trades manually
+- `/about` – Learn more about Lunessa
+
+## License
+This autotrade bot is licensed and owned by Shamim Reza Saikat. All rights reserved.
+
+## Author & Ownership
+Autotrade author: Shamim Reza Saikat
+ORCID: 0009-0008-3119-166X
+ORCID Record: https://orcid.org/0009-0008-3119-166X
+
+---
+Lunessa Shi’ra Gork – Your AI-powered crypto trading companion.
+>>>>>>> ea2e5e0 (Save all local changes before merge)

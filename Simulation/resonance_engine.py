@@ -12,21 +12,20 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from .stochastic_simulation import run_metric_perturbation_simulation
 from .quantum_clock import run_quantum_clock_phase
 from .plot_utilities import plot_metric_perturbation, plot_clock_phase
-from trade import get_rsi, get_bollinger_bands, get_current_price, get_macd
-from trading_module import get_trade_suggestion
+## Do not import trade functions at the top to avoid circular import
+from trading_module import get_trade_suggestion, TradeAction
 
-def run_resonance_simulation(user_id: int, symbol: str | None = None):
+def run_resonance_simulation(user_id: int, symbol: str | None = None, indicators: dict | None = None):
     """
     Runs the full resonance simulation, generates plots, and returns a narrative with file paths.
     If a symbol is provided, the resonance is based on its RSI, Bollinger Bands, and MACD. Otherwise, it's random.
     """
     resonance_source = "Random Cosmic Fluctuation"
-    if symbol:
-        # --- Symbol-Specific Resonance ---
-        rsi = get_rsi(symbol)
-        price = get_current_price(symbol)
-        upper_band, _, lower_band, std = get_bollinger_bands(symbol)
-        _, _, macd_hist = get_macd(symbol)
+    if symbol and indicators:
+        rsi, price, upper_band, lower_band, std, macd_hist = (
+            indicators.get('rsi'), indicators.get('price'), indicators.get('upper_band'),
+            indicators.get('lower_band'), indicators.get('std'), indicators.get('macd_hist')
+        )
 
         if rsi is not None and price is not None and lower_band is not None and upper_band is not None and macd_hist is not None and std is not None:
             # 1. Calculate RSI Factor (0 to 1, where 1 is a strong buy signal)
@@ -83,6 +82,7 @@ def run_resonance_simulation(user_id: int, symbol: str | None = None):
     # Get a trading suggestion based on the resonance level
     trade_suggestion = get_trade_suggestion(resonance_level)
 
+
     # Sanitize the suggestion value for Markdown V1 by replacing underscores.
     trade_suggestion_text = trade_suggestion.value.replace('_', ' ')
 
@@ -101,11 +101,14 @@ def run_resonance_simulation(user_id: int, symbol: str | None = None):
         "narrative": narrative,
         "metric_plot": metric_plot_filename,
         "clock_plot": clock_plot_filename,
+        "trade_suggestion": trade_suggestion,
     }
 
 if __name__ == '__main__':
     # For direct testing of the simulation engine
-    results = run_resonance_simulation(user_id=123)
+    # Pass dummy indicator data for testing
+    dummy_indicators = {'rsi': 30, 'price': 100, 'upper_band': 110, 'lower_band': 90, 'std': 5, 'macd_hist': 0.5}
+    results = run_resonance_simulation(user_id=123, symbol="TESTUSDT", indicators=dummy_indicators)
     print(results["narrative"])
     print(f"Metric plot saved to: {results['metric_plot']}")
     print(f"Clock plot saved to: {results['clock_plot']}")
