@@ -26,7 +26,7 @@ CHAT_ID = os.getenv("CHAT_ID") # For global bot alerts
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID")) if os.getenv("ADMIN_USER_ID") else None
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_REFERRAL_CODE = os.getenv("ADMIN_REFERRAL_CODE") # For the /referral command
-GDRIVE_REMOTE_NAME = os.getenv("GDRIVE_REMOTE_NAME") # For database backups
+GDRIVE_REMOTE_NAME = "LuneesaBook" # For database backups
 
 # --- Database Configuration ---
 DB_NAME = "lunara_bot.db" # Dedicated database file for reliability

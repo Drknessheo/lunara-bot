@@ -139,6 +139,9 @@ def get_current_price(symbol: str):
         logger.error(f"An unexpected error occurred getting price for {symbol}: {e}")
         return None
 
+def get_monitored_coins():
+    return config.AI_MONITOR_COINS
+
 def get_rsi(symbol="BTCUSDT", interval=Client.KLINE_INTERVAL_1HOUR, period=14):
     """Calculates the Relative Strength Index (RSI) for a given symbol."""
     try:
@@ -191,6 +194,48 @@ def get_macd(symbol, interval=Client.KLINE_INTERVAL_1HOUR, fast_period=12, slow_
         if len(klines) < slow_period + signal_period:
             return None, None, None
 
+        def get_micro_vwap(symbol, interval=Client.KLINE_INTERVAL_1MINUTE, window=20):
+            """Calculates Micro-VWAP (short-term VWAP) for a given symbol."""
+            try:
+                klines = client.get_historical_klines(symbol, interval, f"{window} minutes ago UTC")
+                if len(klines) < window:
+                    return None
+                prices = np.array([float(k[4]) for k in klines])
+                volumes = np.array([float(k[5]) for k in klines])
+                vwap = np.sum(prices * volumes) / np.sum(volumes)
+                return vwap
+            except Exception as e:
+                logger.error(f"Error calculating Micro-VWAP for {symbol}: {e}")
+                return None
+
+        def get_bid_ask_volume_ratio(symbol, interval=Client.KLINE_INTERVAL_1MINUTE, window=20):
+            """Estimates bid/ask volume ratio using kline buy/sell volume approximation."""
+            try:
+                klines = client.get_historical_klines(symbol, interval, f"{window} minutes ago UTC")
+                if len(klines) < window:
+                    return None
+                buy_volumes = np.array([float(k[9]) for k in klines])  # taker buy volume
+                total_volumes = np.array([float(k[5]) for k in klines])
+                sell_volumes = total_volumes - buy_volumes
+                ratio = np.sum(buy_volumes) / (np.sum(sell_volumes) + 1e-8)
+                return ratio
+            except Exception as e:
+                logger.error(f"Error calculating bid/ask volume ratio for {symbol}: {e}")
+                return None
+
+        def get_mad(symbol, interval=Client.KLINE_INTERVAL_1HOUR, window=20):
+            """Calculates Mean Absolute Deviation (MAD) for a given symbol."""
+            try:
+                klines = client.get_historical_klines(symbol, interval, f"{window} hours ago UTC")
+                if len(klines) < window:
+                    return None
+                closes = np.array([float(k[4]) for k in klines])
+                mean = np.mean(closes)
+                mad = np.mean(np.abs(closes - mean))
+                return mad
+            except Exception as e:
+                logger.error(f"Error calculating MAD for {symbol}: {e}")
+                return None
         closes = pd.Series([float(k[4]) for k in klines])
 
         # Calculate EMAs

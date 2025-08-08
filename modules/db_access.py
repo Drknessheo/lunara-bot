@@ -70,6 +70,18 @@ def initialize_database():
             user_id INTEGER PRIMARY KEY
         );
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS autotrades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            buy_price REAL NOT NULL,
+            sell_price REAL,
+            status TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            closed_at DATETIME
+        );
+    """)
     conn.commit()
 
 def migrate_schema():
@@ -135,10 +147,132 @@ def get_or_create_user(user_id: int):
         user = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
     return user
 
-def get_autotrade_status(user_id: int) -> bool:
-    """Return True if autotrade is enabled for the user, else False. Uses users table."""
+def get_autotrade_status(user_id: int):
     conn = get_db_connection()
     row = conn.execute("SELECT autotrade_enabled FROM users WHERE user_id = ?", (user_id,)).fetchone()
-    if row is not None and row['autotrade_enabled'] is not None:
-        return bool(row['autotrade_enabled'])
-    return False
+    return bool(row['autotrade_enabled']) if row and row['autotrade_enabled'] is not None else False
+
+def set_autotrade_status(user_id: int, enabled: bool):
+    """Set autotrade status for a user in the users table."""
+    get_or_create_user(user_id)
+    conn = get_db_connection()
+    conn.execute("UPDATE users SET autotrade_enabled = ? WHERE user_id = ?", (int(enabled), user_id))
+    conn.commit()
+
+def get_open_trades(user_id: int):
+    """Retrieves all open trades for a specific user."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, user_id, coin_symbol, buy_price, buy_timestamp, stop_loss_price, take_profit_price FROM trades WHERE user_id = ? AND status = 'open'", (user_id,)
+    )
+    return cursor.fetchall()
+
+def get_user_trading_mode_and_balance(user_id: int):
+    """Gets the user's trading mode and paper balance."""
+    user = get_or_create_user(user_id)
+    return user['trading_mode'], user['paper_balance']
+
+
+def get_watched_items_by_user(user_id: int):
+    """Retrieves all watched symbols for a specific user."""
+    conn = get_db_connection()
+    items = conn.execute(
+        "SELECT coin_symbol, add_timestamp FROM watchlist WHERE user_id = ?", (user_id,)
+    ).fetchall()
+    return items
+
+def get_user_api_keys(user_id: int):
+    """
+    Retrieves and decrypts a user's Binance API keys.
+    """
+    from security import decrypt_data
+    conn = get_db_connection()
+    row = conn.execute("SELECT api_key, secret_key FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    if not row or not row['api_key'] or not row['secret_key']:
+        return None, None
+    api_key = decrypt_data(row['api_key'])
+    secret_key = decrypt_data(row['secret_key'])
+    return api_key, secret_key
+
+def get_user_tier(user_id: int) -> str:
+    """
+    Retrieves a user's subscription tier.
+    Treats the admin/creator as 'PREMIUM' for all commands.
+    """
+    import config
+    if user_id == getattr(config, 'ADMIN_USER_ID', None):
+        return 'PREMIUM'
+    user = get_or_create_user(user_id)
+    return user['subscription_tier']
+
+def get_user_effective_settings(user_id: int) -> dict:
+    """
+    Returns the effective settings for a user by layering their custom
+    settings over their subscription tier's defaults.
+    """
+    import config
+    tier = get_user_tier(user_id)
+    settings = config.get_active_settings(tier).copy()  # Start with a copy of tier defaults
+    conn = get_db_connection()
+    user_data = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    if not user_data:
+        return settings
+    user_keys = user_data.keys()
+    # Override defaults with custom settings if they exist (are not NULL)
+    if 'custom_rsi_buy' in user_keys and user_data['custom_rsi_buy'] is not None:
+        settings['RSI_BUY_THRESHOLD'] = user_data['custom_rsi_buy']
+    if 'custom_rsi_sell' in user_keys and user_data['custom_rsi_sell'] is not None:
+        settings['RSI_SELL_THRESHOLD'] = user_data['custom_rsi_sell']
+    if 'custom_stop_loss' in user_keys and user_data['custom_stop_loss'] is not None:
+        settings['STOP_LOSS_PERCENTAGE'] = user_data['custom_stop_loss']
+    if 'custom_trailing_activation' in user_keys and user_data['custom_trailing_activation'] is not None:
+        settings['TRAILING_PROFIT_ACTIVATION_PERCENT'] = user_data['custom_trailing_activation']
+    if 'custom_trailing_drop' in user_keys and user_data['custom_trailing_drop'] is not None:
+        settings['TRAILING_STOP_DROP_PERCENT'] = user_data['custom_trailing_drop']
+    return settings
+
+def is_trade_open(user_id: int, coin_symbol: str):
+    """Checks if a user already has an open trade for a specific symbol."""
+    conn = get_db_connection()
+    trade = conn.execute(
+        "SELECT id FROM trades WHERE user_id = ? AND coin_symbol = ? AND status = 'open'",
+        (user_id, coin_symbol)
+    ).fetchone()
+    return trade is not None
+
+
+def get_closed_trades(user_id: int):
+    """Retrieves all closed trades for a specific user."""
+    conn = get_db_connection()
+    return conn.execute(
+        "SELECT coin_symbol, buy_price, sell_price FROM trades WHERE user_id = ? AND status = 'closed' AND sell_price IS NOT NULL",
+        (user_id,)
+    ).fetchall()
+
+
+def get_global_top_trades(limit: int = 3):
+    """Retrieves the top N most profitable closed trades across all users."""
+    conn = get_db_connection()
+    query = '''
+        SELECT
+            user_id,
+            coin_symbol,
+            buy_price,
+            sell_price,
+            ((sell_price - buy_price) / buy_price) * 100 AS pnl_percent
+        FROM trades
+        WHERE status = 'closed' AND sell_price IS NOT NULL AND ((sell_price - buy_price) / buy_price) > 0
+        ORDER BY pnl_percent DESC
+        LIMIT ?
+    '''
+    return conn.execute(query, (limit,)).fetchall()
+
+def is_on_watchlist(user_id: int, coin_symbol: str):
+    """Checks if a user is already watching a specific symbol."""
+    conn = get_db_connection()
+    item = conn.execute(
+        "SELECT id FROM watchlist WHERE user_id = ? AND coin_symbol = ?",
+        (user_id, coin_symbol)
+    ).fetchone()
+    return item is not None

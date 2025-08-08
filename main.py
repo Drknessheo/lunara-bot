@@ -17,6 +17,8 @@ from decorators import require_tier
 from modules import db_access as db
 import logging
 from datetime import datetime, timezone, timedelta
+import autotrade_jobs
+import autotrade_db
 
 logger = logging.getLogger(__name__)
 
@@ -644,29 +646,27 @@ async def myprofile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     settings = db.get_user_effective_settings(user_id)
     trading_mode, paper_balance = db.get_user_trading_mode_and_balance(user_id)
 
+    username = update.effective_user.username or "(not set)"
+    autotrade = "Enabled" if db.get_autotrade_status(user_id) else "Disabled"
     message = (
-        f"👤 **Your Profile** 👤\\n\\n"
-        f"**User ID:** `{user_id}`\\n"
-        f"**Trading Mode:** {trading_mode}\\n"
-        f"**Subscription Tier:** {user_tier}\\n\\n"
+        f"*Your Profile*\n"
+        f"\n*User ID:* `{user_id}`"
+        f"\n*Username:* @{username}"
+        f"\n*Tier:* {user_tier}"
+        f"\n*Trading Mode:* {trading_mode}"
+        f"\n*Autotrade:* {autotrade}"
     )
-
-    if user_tier == 'PREMIUM':
-        message += (
-            "**Your Effective Trading Parameters:**\\n"
-            f"- `rsi_buy`: {settings['RSI_BUY_THRESHOLD']}\\n"
-            f"- `rsi_sell`: {settings['RSI_SELL_THRESHOLD']}\\n"
-            f"- `stop_loss`: {settings['STOP_LOSS_PERCENTAGE']}%\\n"
-            f"- `trailing_activation`: {settings['TRAILING_PROFIT_ACTIVATION_PERCENT']}%\\n"
-            f"- `trailing_drop`: {settings['TRAILING_STOP_DROP_PERCENT']}%\\n\\n"
-            "You can change these with the `/settings` command."
-        )
-        message += (
-            f"**Paper Balance:** `${paper_balance:,.2f}`\\n"
-        )
+    if trading_mode == "LIVE":
+        # Optionally, fetch and show real USDT balance here
+        message += f"\n*USDT Balance:* (see /wallet)"
     else:
-        message += "Upgrade to Premium with `/subscribe` to unlock custom settings and advanced features!"
-
+        message += f"\n*Paper Balance:* `${paper_balance:,.2f}`"
+    message += "\n\n*Custom Settings:*"
+    message += f"\n- RSI Buy: {settings['RSI_BUY_THRESHOLD']}"
+    message += f"\n- RSI Sell: {settings['RSI_SELL_THRESHOLD']}"
+    message += f"\n- Stop Loss: {settings['STOP_LOSS_PERCENTAGE']}%"
+    message += f"\n- Trailing Activation: {settings['TRAILING_PROFIT_ACTIVATION_PERCENT']}%"
+    message += f"\n- Trailing Drop: {settings['TRAILING_STOP_DROP_PERCENT']}%"
     await update.message.reply_text(message, parse_mode='Markdown')
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -893,6 +893,7 @@ def main() -> None:
     application.add_handler(CommandHandler("import_all", import_all_command))
     application.add_handler(CommandHandler("wallet", wallet_command))
     application.add_handler(CommandHandler("checked", checked_command))
+    application.add_handler(CommandHandler("autotrade", autotrade_command))
 
     # --- Set up background jobs ---
     job_queue = application.job_queue
@@ -900,6 +901,8 @@ def main() -> None:
     job_queue.run_repeating(trade.scheduled_monitoring_job, interval=60, first=10) # This job now handles all monitoring
     # Schedule the daily summary job to run at 8:00 AM UTC
     job_queue.run_daily(send_daily_status_summary, time=datetime(1, 1, 1, 8, 0, 0, tzinfo=timezone.utc).time())
+    job_queue.run_repeating(autotrade_jobs.autotrade_cycle, interval=300, first=10)
+    job_queue.run_repeating(autotrade_jobs.monitor_autotrades, interval=60, first=10)
 
     logger.info("Starting bot with market monitor and AI trade monitor jobs scheduled...")
     application.run_polling()
